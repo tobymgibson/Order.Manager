@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import re
+from datetime import datetime
 
 # --- Machine capacities (feeds per day) ---
 MACHINE_CAPACITY = {
@@ -22,6 +23,7 @@ MACHINE_ALIASES = {
 # --- Optional chart support ---
 try:
     import plotly.express as px
+    import plotly.graph_objects as go
     PLOTLY_AVAILABLE = True
 except ImportError:
     PLOTLY_AVAILABLE = False
@@ -29,6 +31,8 @@ except ImportError:
 # --- Streamlit setup ---
 st.set_page_config(page_title="🏭 Production Dashboard", layout="wide")
 st.title("🏭 Production Planning Dashboard")
+st.caption(f"🕒 Last refreshed: {datetime.now():%d %b %Y, %H:%M}")
+
 st.caption("Upload your Excel (.xlsx) file to view KPIs, utilisation, and planned orders by machine.")
 
 # --- File upload ---
@@ -109,7 +113,7 @@ if uploaded_file:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # --- Extract sales-order dates from text ---
+    # --- Extract sales order dates from text ---
     def extract_date(text):
         if not isinstance(text, str):
             return pd.NaT
@@ -173,24 +177,53 @@ if uploaded_file:
 
         util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
 
+        # --- Updated colour logic: green = high utilisation ---
         def colour_util(val):
             if pd.isna(val):
                 return ""
             if val > 100:
-                return "background-colour:#ff4d4d;colour:white"
-            elif val >= 70:
-                return "background-colour:#ffd633"
+                return "background-colour:#66ff66;colour:black"     # Green = over capacity (great!)
+            elif val >= 80:
+                return "background-colour:#ffff66;colour:black"     # Yellow = near capacity (good)
             else:
-                return "background-colour:#85e085"
+                return "background-colour:#ff6666;colour:white"     # Red = under capacity
 
         st.dataframe(util_df.style.applymap(colour_util, subset=["Utilisation (%)"]),
                      use_container_width=True)
 
+        # --- Plotly chart with reversed colour scale ---
         if PLOTLY_AVAILABLE:
-            fig = px.bar(util_df, x="Machine", y="Utilisation (%)", text_auto=True,
-                         color="Utilisation (%)", color_continuous_scale=["green", "yellow", "red"],
-                         range_y=[0, 120])
+            fig = px.bar(
+                util_df,
+                x="Machine",
+                y="Utilisation (%)",
+                text_auto=True,
+                color="Utilisation (%)",
+                color_continuous_scale=["red", "yellow", "green"],
+                range_y=[0, 120]
+            )
+            fig.update_traces(textfont_size=12)
             st.plotly_chart(fig, use_container_width=True)
+
+        # --- Average utilisation gauge ---
+        avg_util = util_df["Utilisation (%)"].mean(skipna=True)
+        st.markdown("### ⚖️ Average Utilisation Across All Machines")
+        if PLOTLY_AVAILABLE and not pd.isna(avg_util):
+            gauge_fig = go.Figure(go.Indicator(
+                mode="gauge+number",
+                value=avg_util,
+                title={'text': "Average Utilisation (%)"},
+                gauge={
+                    'axis': {'range': [0, 120]},
+                    'bar': {'color': "green"},
+                    'steps': [
+                        {'range': [0, 80], 'color': "red"},
+                        {'range': [80, 100], 'color': "yellow"},
+                        {'range': [100, 120], 'color': "limegreen"},
+                    ],
+                }
+            ))
+            st.plotly_chart(gauge_fig, use_container_width=True)
 
         # --- Machine-specific orders ---
         st.subheader("🧾 Machine-Specific Planned Orders")
