@@ -5,10 +5,18 @@ import re
 # --- Machine capacities (feeds per day) ---
 MACHINE_CAPACITY = {
     "BO1": 24000,   # Century
-    "KO1": 50000,   # Klett1
-    "JC1": 48000,   # JinChang
+    "KO1": 50000,   # Klett 1
+    "JC1": 48000,   # Jin Chang
     "TCY": 9000,    # TCY
-    "KO3": 15000,   # Klett3
+    "KO3": 15000,   # Klett 3
+}
+
+# --- Alternate machine name mappings ---
+MACHINE_ALIASES = {
+    "JC": "JC1",
+    "BO": "BO1",
+    "KLETT": "KO1",
+    "KLETT3": "KO3",
 }
 
 # --- Optional chart support ---
@@ -21,7 +29,7 @@ except ImportError:
 # --- Streamlit setup ---
 st.set_page_config(page_title="🏭 Production Dashboard", layout="wide")
 st.title("🏭 Production Planning Dashboard")
-st.caption("Upload your Excel (.xlsx) file to view KPIs, utilization, and planned orders by machine.")
+st.caption("Upload your Excel (.xlsx) file to view KPIs, utilisation, and planned orders by machine.")
 
 # --- File upload ---
 uploaded_file = st.file_uploader("📁 Upload Excel (.xlsx) or CSV", type=["xlsx", "csv"])
@@ -32,7 +40,6 @@ if uploaded_file:
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
-            # Automatically load the first sheet in the workbook
             excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
             first_sheet = excel_file.sheet_names[0]
             df = pd.read_excel(excel_file, sheet_name=first_sheet)
@@ -55,9 +62,9 @@ if uploaded_file:
     col_machine = find_col(["machine"])
     col_customer = find_col(["customer"])
     col_row = find_col(["row"])
-    col_qty = find_col(["quantity"])
-    col_wo = find_col(["works order", "w/o"])
+    col_feeds = find_col(["feeds"])
     col_overall_qty = find_col(["overall quantity", "quantity.1"])
+    col_wo = find_col(["works order", "w/o"])
     col_finish = find_col(["finish"])
     col_earliest = find_col(["earliest delivery"])
     col_next = find_col(["next uncovered order"])
@@ -70,7 +77,7 @@ if uploaded_file:
         col_machine: "Machine",
         col_customer: "Customer",
         col_row: "ROW",
-        col_qty: "Quantity",
+        col_feeds: "Feeds",
         col_wo: "Works_Order",
         col_overall_qty: "Overall_Quantity",
         col_finish: "Estimated_Finish",
@@ -87,13 +94,13 @@ if uploaded_file:
     if "Machine" in df.columns:
         df["Machine"] = df["Machine"].ffill()
 
-    # --- Drop filler rows (if empty) ---
-    subset = [c for c in ["Customer", "Quantity"] if c in df.columns]
+    # --- Remove filler rows ---
+    subset = [c for c in ["Customer", "Feeds"] if c in df.columns]
     if subset:
         df = df.dropna(subset=subset, how="all")
 
     # --- Convert numeric columns ---
-    for col in ["Quantity", "Overall_Quantity", "Order_Value"]:
+    for col in ["Feeds", "Overall_Quantity", "Order_Value"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -102,7 +109,7 @@ if uploaded_file:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # --- Extract sales order dates from text ---
+    # --- Extract sales-order dates from text ---
     def extract_date(text):
         if not isinstance(text, str):
             return pd.NaT
@@ -135,73 +142,69 @@ if uploaded_file:
     st.subheader("📊 Key Metrics")
     total_orders = len(df)
     total_value = df["Order_Value"].sum(skipna=True) if "Order_Value" in df.columns else 0
-    total_qty = df["Quantity"].sum(skipna=True) if "Quantity" in df.columns else 0
+    total_feeds = df["Feeds"].sum(skipna=True) if "Feeds" in df.columns else 0
     total_overall_qty = df["Overall_Quantity"].sum(skipna=True) if "Overall_Quantity" in df.columns else 0
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Orders", total_orders)
     c2.metric("Total Value", f"£{total_value:,.0f}")
-    c3.metric("Line Qty", f"{int(total_qty):,}")
+    c3.metric("Total Feeds", f"{int(total_feeds):,}")
     c4.metric("Overall Qty", f"{int(total_overall_qty):,}")
 
-    # --- Utilization ---
-    st.subheader("⚙️ Estimated Machine Utilization")
+    # --- Utilisation ---
+    st.subheader("⚙️ Estimated Machine Utilisation")
 
     if machine_col:
         util_data = []
-
-        # Detect correct quantity column
-        qty_col = None
-        for candidate in ["Overall_Quantity", "Quantity.1", "Overall quantity", "Quantity"]:
-            if candidate in df.columns:
-                qty_col = candidate
-                break
+        df[machine_col] = df[machine_col].astype(str).str.strip().str.upper()
+        qty_col = "Feeds" if "Feeds" in df.columns else "Overall_Quantity"
 
         for m in sorted(df[machine_col].dropna().unique()):
             m_code = str(m).strip().upper()
-            cap = MACHINE_CAPACITY.get(m_code, None)
-            planned = df.loc[df[machine_col].str.upper() == m_code, qty_col].sum() if qty_col else 0
+            m_lookup = MACHINE_ALIASES.get(m_code, m_code)
+            cap = MACHINE_CAPACITY.get(m_lookup, None)
+            planned_feeds = df.loc[df[machine_col] == m, qty_col].sum()
 
             if cap:
-                util = (planned / cap) * 100
-                util_data.append((m_code, cap, planned, round(util, 1)))
+                utilisation = (planned_feeds / cap) * 100
+                util_data.append((m_lookup, cap, planned_feeds, round(utilisation, 1)))
             else:
-                util_data.append((m_code, "N/A", planned, None))
+                util_data.append((m_lookup, "N/A", planned_feeds, None))
 
-        util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Qty", "Utilization (%)"])
+        util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
 
-        def color_util(val):
+        def colour_util(val):
             if pd.isna(val):
                 return ""
             if val > 100:
-                return "background-color:#ff4d4d;color:white"
+                return "background-colour:#ff4d4d;colour:white"
             elif val >= 70:
-                return "background-color:#ffd633"
+                return "background-colour:#ffd633"
             else:
-                return "background-color:#85e085"
+                return "background-colour:#85e085"
 
-        st.dataframe(util_df.style.applymap(color_util, subset=["Utilization (%)"]),
+        st.dataframe(util_df.style.applymap(colour_util, subset=["Utilisation (%)"]),
                      use_container_width=True)
 
         if PLOTLY_AVAILABLE:
-            fig = px.bar(util_df, x="Machine", y="Utilization (%)", text_auto=True,
-                         color="Utilization (%)", color_continuous_scale=["green", "yellow", "red"],
+            fig = px.bar(util_df, x="Machine", y="Utilisation (%)", text_auto=True,
+                         color="Utilisation (%)", color_continuous_scale=["green", "yellow", "red"],
                          range_y=[0, 120])
             st.plotly_chart(fig, use_container_width=True)
 
-        # --- Machine-Specific Planned Orders ---
+        # --- Machine-specific orders ---
         st.subheader("🧾 Machine-Specific Planned Orders")
         selected_machine = st.selectbox("Select a Machine", ["All Machines"] + sorted(df[machine_col].dropna().unique()))
         subset = df if selected_machine == "All Machines" else df[df[machine_col] == selected_machine]
         if not subset.empty:
-            show_cols = [c for c in ["Machine", "Customer", "ROW", "Works_Order", "Quantity", "Overall_Quantity",
+            show_cols = [c for c in ["Machine", "Customer", "ROW", "Works_Order", "Feeds", "Overall_Quantity",
                                      "Status", "Run_Decision", "Order_Value", "Estimated_Finish",
                                      "Earliest_Delivery", "Next_Uncovered_Order"] if c in subset.columns]
             st.dataframe(subset[show_cols], use_container_width=True)
         else:
             st.info(f"No orders found for {selected_machine}.")
     else:
-        st.warning("⚠️ No 'Machine' column detected in your file. Ensure Column A contains machine codes (BO1, KO1, etc.).")
+        st.warning("⚠️ No 'Machine' column detected. Ensure Column A contains machine codes (BO1, KO1, JC1, TCY, KO3).")
 
     # --- Orders over time ---
     if "Sales_Order_Date" in df.columns:
@@ -231,8 +234,10 @@ if uploaded_file:
             st.info("No value column found to plot orders over time.")
 
     # --- Download button ---
-    st.download_button("⬇️ Download Filtered Data", df.to_csv(index=False).encode("utf-8"),
-                       "filtered_orders.csv", "text/csv")
+    st.download_button("⬇️ Download Filtered Data",
+                       df.to_csv(index=False).encode("utf-8"),
+                       "filtered_orders.csv",
+                       "text/csv")
 
 else:
     st.info("👆 Upload your Excel or CSV file to begin.")
