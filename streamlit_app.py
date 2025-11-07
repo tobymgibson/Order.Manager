@@ -148,14 +148,14 @@ if uploaded_file:
         sel_mach = st.sidebar.multiselect("Machine(s)", machines, default=machines)
         df = df[df[machine_col].isin(sel_mach)]
 
-    # --- KPIs + Gauge ---
+    # --- KPIs ---
     st.subheader("📊 Key Metrics")
     total_orders = len(df)
     total_value = df["Order_Value"].sum(skipna=True)
     total_feeds = df["Feeds"].sum(skipna=True)
     total_overall_qty = df["Overall_Quantity"].sum(skipna=True) if "Overall_Quantity" in df.columns else 0
 
-    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 2])
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Orders", total_orders)
     c2.metric("Total Value", f"£{total_value:,.0f}")
     c3.metric("Total Feeds", f"{int(total_feeds):,}")
@@ -180,17 +180,27 @@ if uploaded_file:
 
     util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
 
-    # --- Average utilisation gauge ---
+    # --- Centre-aligned Average Utilisation Gauge ---
     if not util_df.empty and "Utilisation (%)" in util_df.columns:
         avg_util = util_df["Utilisation (%)"].mean(skipna=True)
+        st.markdown("### ⚖️ Average Utilisation Across All Machines", unsafe_allow_html=True)
+
         if PLOTLY_AVAILABLE and not pd.isna(avg_util):
+            # Dynamic colour based on performance
+            if avg_util < 80:
+                gauge_colour = "red"
+            elif avg_util <= 100:
+                gauge_colour = "yellow"
+            else:
+                gauge_colour = "limegreen"
+
             gauge_fig = go.Figure(go.Indicator(
                 mode="gauge+number",
                 value=avg_util,
                 title={'text': "Average Utilisation (%)"},
                 gauge={
                     'axis': {'range': [0, 120]},
-                    'bar': {'color': "green"},
+                    'bar': {'color': gauge_colour},
                     'steps': [
                         {'range': [0, 80], 'color': "red"},
                         {'range': [80, 100], 'color': "yellow"},
@@ -198,7 +208,18 @@ if uploaded_file:
                     ],
                 }
             ))
-            c5.plotly_chart(gauge_fig, use_container_width=True)
+
+            gauge_fig.update_layout(
+                margin=dict(l=80, r=80, t=40, b=40),
+                width=600,
+                height=350,
+                paper_bgcolor="rgba(0,0,0,0)",
+                font=dict(size=16)
+            )
+
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                st.plotly_chart(gauge_fig, use_container_width=True)
 
     # --- Utilisation table and chart ---
     st.subheader("⚙️ Estimated Machine Utilisation")
