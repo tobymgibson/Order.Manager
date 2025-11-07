@@ -5,11 +5,11 @@ from datetime import datetime
 
 # --- Machine capacities (feeds per day) ---
 MACHINE_CAPACITY = {
-    "BO1": 24000,   # Century
-    "KO1": 50000,   # Klett 1
-    "JC1": 48000,   # Jin Chang
-    "TCY": 9000,    # TCY
-    "KO3": 15000,   # Klett 3
+    "BO1": 24000,
+    "KO1": 50000,
+    "JC1": 48000,
+    "TCY": 9000,
+    "KO3": 15000,
 }
 
 # --- Alternate machine name mappings ---
@@ -22,7 +22,6 @@ MACHINE_ALIASES = {
 
 # --- Optional chart support ---
 try:
-    import plotly.express as px
     import plotly.graph_objects as go
     PLOTLY_AVAILABLE = True
 except ImportError:
@@ -34,21 +33,41 @@ st.title("🏭 Production Planning Dashboard")
 st.caption(f"🕒 Last refreshed: {datetime.now():%d %b %Y, %H:%M}")
 st.caption("Upload your Excel (.xlsx) file to view KPIs, utilisation, and planned orders by machine.")
 
-# --- File upload ---
+# --- Load uploaded file ---
+def load_data(uploaded_file):
+    if uploaded_file.name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+    else:
+        excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
+        first_sheet = excel_file.sheet_names[0]
+        df = pd.read_excel(excel_file, sheet_name=first_sheet)
+    return df
+
+
 uploaded_file = st.file_uploader("📁 Upload Excel (.xlsx) or CSV", type=["xlsx", "csv"])
 
 if uploaded_file:
-    # --- Read file ---
     try:
-        if uploaded_file.name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            excel_file = pd.ExcelFile(uploaded_file, engine="openpyxl")
-            first_sheet = excel_file.sheet_names[0]
-            df = pd.read_excel(excel_file, sheet_name=first_sheet)
+        df = load_data(uploaded_file)
     except Exception as e:
         st.error(f"❌ Could not read file: {e}")
         st.stop()
+
+    # Save original for reset
+    if "original_df" not in st.session_state:
+        st.session_state.original_df = df.copy()
+
+    # Reset button
+    if st.button("🔄 Reset Data to Original Upload"):
+        st.session_state.editable_df = st.session_state.original_df.copy()
+        st.success("✅ Data reset to original upload.")
+        st.rerun()
+
+    # Work with editable dataframe
+    if "editable_df" not in st.session_state:
+        st.session_state.editable_df = df.copy()
+
+    df = st.session_state.editable_df.copy()
 
     # --- Clean headers ---
     df.columns = df.columns.astype(str).str.strip()
@@ -73,7 +92,7 @@ if uploaded_file:
     col_next = find_col(["next uncovered order"])
     col_status = find_col(["status"])
     col_decision = find_col(["run decision"])
-    col_value = find_col(["order value", "value"])
+    col_value = find_col(["order value", "value", "£"])
 
     # --- Rename columns consistently ---
     rename_map = {
@@ -93,33 +112,23 @@ if uploaded_file:
     rename_map = {k: v for k, v in rename_map.items() if k is not None}
     df.rename(columns=rename_map, inplace=True)
 
-    # --- Fill down machine names ---
+    # --- Fill machine names down ---
     if "Machine" in df.columns:
         df["Machine"] = df["Machine"].ffill()
 
-    # --- Remove filler rows ---
-    subset = [c for c in ["Customer", "Feeds"] if c in df.columns]
-    if subset:
-        df = df.dropna(subset=subset, how="all")
-
-    # --- Force Feeds to numeric ---
-    if "Feeds" in df.columns:
-        df["Feeds"] = pd.to_numeric(df["Feeds"], errors="coerce").fillna(0).astype(float)
-    else:
-        st.error("❌ 'Feeds' column not found. Please ensure column D is labelled 'Feeds'.")
-        st.stop()
-
-    # --- Convert numeric columns ---
-    for col in ["Overall_Quantity", "Order_Value"]:
+    # --- Clean numeric columns ---
+    for col in ["Feeds", "Overall_Quantity", "Order_Value"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        else:
+            df[col] = 0  # ensure columns always exist
 
-    # --- Parse date columns ---
+    # --- Parse dates ---
     for col in ["Estimated_Finish", "Earliest_Delivery"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # --- Extract sales order dates ---
+    # --- Extract sales order date ---
     def extract_date(text):
         if not isinstance(text, str):
             return pd.NaT
@@ -153,7 +162,7 @@ if uploaded_file:
     total_orders = len(df)
     total_value = df["Order_Value"].sum(skipna=True)
     total_feeds = df["Feeds"].sum(skipna=True)
-    total_overall_qty = df["Overall_Quantity"].sum(skipna=True) if "Overall_Quantity" in df.columns else 0
+    total_overall_qty = df["Overall_Quantity"].sum(skipna=True)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Orders", total_orders)
@@ -161,17 +170,16 @@ if uploaded_file:
     c3.metric("Total Feeds", f"{int(total_feeds):,}")
     c4.metric("Overall Qty", f"{int(total_overall_qty):,}")
 
-    # --- Utilisation calculation (Feeds only) ---
+    # --- Utilisation ---
+    st.subheader("⚙️ Estimated Machine Utilisation")
     util_data = []
     if machine_col:
         df[machine_col] = df[machine_col].astype(str).str.strip().str.upper()
-
         for m in sorted(df[machine_col].dropna().unique()):
             m_code = str(m).strip().upper()
             m_lookup = MACHINE_ALIASES.get(m_code, m_code)
             cap = MACHINE_CAPACITY.get(m_lookup, None)
             planned_feeds = df.loc[df[machine_col] == m, "Feeds"].sum()
-
             if cap:
                 utilisation = (planned_feeds / cap) * 100
                 util_data.append((m_lookup, cap, planned_feeds, round(utilisation, 1)))
@@ -180,19 +188,29 @@ if uploaded_file:
 
     util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
 
-    # --- Centre-aligned Average Utilisation Gauge ---
+    def colour_util(val):
+        if pd.isna(val):
+            return ""
+        if val > 100:
+            return "background-color:#66ff66; color:black"
+        elif val >= 80:
+            return "background-color:#ffff66; color:black"
+        else:
+            return "background-color:#ff6666; color:white"
+
+    st.dataframe(util_df.style.applymap(colour_util, subset=["Utilisation (%)"]), use_container_width=True)
+
+    # --- Gauge ---
     if not util_df.empty and "Utilisation (%)" in util_df.columns:
         avg_util = util_df["Utilisation (%)"].mean(skipna=True)
-        st.markdown("### ⚖️ Average Utilisation Across All Machines", unsafe_allow_html=True)
+        st.markdown("### ⚖️ Average Utilisation Across All Machines")
 
         if PLOTLY_AVAILABLE and not pd.isna(avg_util):
-            # Dynamic colour based on performance
-            if avg_util < 80:
-                gauge_colour = "red"
-            elif avg_util <= 100:
-                gauge_colour = "yellow"
-            else:
-                gauge_colour = "limegreen"
+            gauge_colour = (
+                "red" if avg_util < 80 else
+                "yellow" if avg_util <= 100 else
+                "limegreen"
+            )
 
             gauge_fig = go.Figure(go.Indicator(
                 mode="gauge+number",
@@ -209,87 +227,59 @@ if uploaded_file:
                 }
             ))
 
-            gauge_fig.update_layout(
-                margin=dict(l=80, r=80, t=40, b=40),
-                width=600,
-                height=350,
-                paper_bgcolor="rgba(0,0,0,0)",
-                font=dict(size=16)
-            )
-
             col1, col2, col3 = st.columns([1, 2, 1])
             with col2:
                 st.plotly_chart(gauge_fig, use_container_width=True)
 
-    # --- Utilisation table and chart ---
-    st.subheader("⚙️ Estimated Machine Utilisation")
-
-    if not util_df.empty:
-        def colour_util(val):
-            if pd.isna(val):
-                return ""
-            if val > 100:
-                return "background-colour:#66ff66;colour:black"     # Green = over capacity
-            elif val >= 80:
-                return "background-colour:#ffff66;colour:black"     # Yellow = near capacity
-            else:
-                return "background-colour:#ff6666;colour:white"     # Red = under capacity
-
-        st.dataframe(util_df.style.applymap(colour_util, subset=["Utilisation (%)"]),
-                     use_container_width=True)
-
-        if PLOTLY_AVAILABLE:
-            fig = px.bar(
-                util_df,
-                x="Machine",
-                y="Utilisation (%)",
-                text_auto=True,
-                color="Utilisation (%)",
-                color_continuous_scale=["red", "yellow", "green"],
-                range_y=[0, 120]
-            )
-            fig.update_traces(textfont_size=12)
-            st.plotly_chart(fig, use_container_width=True)
-
-    # --- Machine-specific orders ---
+    # --- Editable Machine Orders ---
     st.subheader("🧾 Machine-Specific Planned Orders")
+
     if machine_col:
-        selected_machine = st.selectbox("Select a Machine", ["All Machines"] + sorted(df[machine_col].dropna().unique()))
+        selected_machine = st.selectbox(
+            "Select a Machine",
+            ["All Machines"] + sorted(df[machine_col].dropna().unique())
+        )
+
         subset = df if selected_machine == "All Machines" else df[df[machine_col] == selected_machine]
+
         if not subset.empty:
             show_cols = [c for c in ["Machine", "Customer", "ROW", "Works_Order", "Feeds", "Overall_Quantity",
                                      "Status", "Run_Decision", "Order_Value", "Estimated_Finish",
                                      "Earliest_Delivery", "Next_Uncovered_Order"] if c in subset.columns]
-            st.dataframe(subset[show_cols], use_container_width=True)
-        else:
-            st.info(f"No orders found for {selected_machine}.")
-    else:
-        st.warning("⚠️ No 'Machine' column detected. Ensure Column A contains machine codes (BO1, KO1, JC1, TCY, KO3).")
 
-    # --- Orders over time ---
-    if "Sales_Order_Date" in df.columns:
-        st.subheader("📅 Orders Over Time")
-        df_sorted = df.sort_values("Sales_Order_Date")
+            st.caption("✏️ Edit cells directly or tick boxes to select rows for deletion.")
 
-        if "Order_Value" in df_sorted.columns:
-            if PLOTLY_AVAILABLE:
-                fig2 = px.line(
-                    df_sorted,
-                    x="Sales_Order_Date",
-                    y="Order_Value",
-                    color=machine_col,
-                    markers=True,
-                    title="Orders Over Time"
-                )
-                st.plotly_chart(fig2, use_container_width=True)
+            # Add checkbox column
+            subset = subset.reset_index(drop=True)
+            subset["Delete?"] = False
+
+            edited_df = st.data_editor(subset[["Delete?"] + show_cols], num_rows="dynamic", use_container_width=True,
+                                       key=f"editor_{selected_machine}")
+
+            delete_rows = edited_df.index[edited_df["Delete?"] == True].tolist()
+
+            if st.button("🗑️ Delete Selected Rows"):
+                if delete_rows:
+                    st.session_state.editable_df = st.session_state.editable_df.drop(subset.index[delete_rows])
+                    st.success(f"Deleted {len(delete_rows)} row(s) from {selected_machine}.")
+                    st.rerun()
+                else:
+                    st.warning("Please tick at least one row to delete.")
+
+            # Save edits (ignoring Delete? column)
+            edited_df = edited_df.drop(columns=["Delete?"], errors="ignore")
+            if selected_machine == "All Machines":
+                st.session_state.editable_df = edited_df
             else:
-                st.line_chart(df_sorted.set_index("Sales_Order_Date")["Order_Value"])
+                st.session_state.editable_df.loc[
+                    st.session_state.editable_df[machine_col] == selected_machine, show_cols
+                ] = edited_df.values
 
-    # --- Download filtered data ---
-    st.download_button("⬇️ Download Filtered Data",
-                       df.to_csv(index=False).encode("utf-8"),
-                       "filtered_orders.csv",
-                       "text/csv")
-
+            st.download_button(
+                "⬇️ Download Updated Data",
+                st.session_state.editable_df.to_csv(index=False).encode("utf-8"),
+                f"{selected_machine}_updated.csv",
+                "text/csv"
+            )
 else:
     st.info("👆 Upload your Excel or CSV file to begin.")
