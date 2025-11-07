@@ -32,7 +32,6 @@ except ImportError:
 st.set_page_config(page_title="🏭 Production Dashboard", layout="wide")
 st.title("🏭 Production Planning Dashboard")
 st.caption(f"🕒 Last refreshed: {datetime.now():%d %b %Y, %H:%M}")
-
 st.caption("Upload your Excel (.xlsx) file to view KPIs, utilisation, and planned orders by machine.")
 
 # --- File upload ---
@@ -142,32 +141,31 @@ if uploaded_file:
         sel_mach = st.sidebar.multiselect("Machine(s)", machines, default=machines)
         df = df[df[machine_col].isin(sel_mach)]
 
-    # --- KPIs ---
+    # --- KPIs + Average Utilisation ---
     st.subheader("📊 Key Metrics")
     total_orders = len(df)
     total_value = df["Order_Value"].sum(skipna=True) if "Order_Value" in df.columns else 0
     total_feeds = df["Feeds"].sum(skipna=True) if "Feeds" in df.columns else 0
     total_overall_qty = df["Overall_Quantity"].sum(skipna=True) if "Overall_Quantity" in df.columns else 0
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 2])
     c1.metric("Orders", total_orders)
     c2.metric("Total Value", f"£{total_value:,.0f}")
     c3.metric("Total Feeds", f"{int(total_feeds):,}")
     c4.metric("Overall Qty", f"{int(total_overall_qty):,}")
 
-    # --- Utilisation ---
-    st.subheader("⚙️ Estimated Machine Utilisation")
-
+    # --- Utilisation calculations (based on Feeds only) ---
+    util_data = []
     if machine_col:
-        util_data = []
         df[machine_col] = df[machine_col].astype(str).str.strip().str.upper()
-        qty_col = "Feeds" if "Feeds" in df.columns else "Overall_Quantity"
 
         for m in sorted(df[machine_col].dropna().unique()):
             m_code = str(m).strip().upper()
             m_lookup = MACHINE_ALIASES.get(m_code, m_code)
             cap = MACHINE_CAPACITY.get(m_lookup, None)
-            planned_feeds = df.loc[df[machine_col] == m, qty_col].sum()
+
+            # Always use Feeds as the base metric
+            planned_feeds = df.loc[df[machine_col] == m, "Feeds"].sum() if "Feeds" in df.columns else 0
 
             if cap:
                 utilisation = (planned_feeds / cap) * 100
@@ -175,39 +173,11 @@ if uploaded_file:
             else:
                 util_data.append((m_lookup, "N/A", planned_feeds, None))
 
-        util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
+    util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
 
-        # --- Updated colour logic: green = high utilisation ---
-        def colour_util(val):
-            if pd.isna(val):
-                return ""
-            if val > 100:
-                return "background-colour:#66ff66;colour:black"     # Green = over capacity (great!)
-            elif val >= 80:
-                return "background-colour:#ffff66;colour:black"     # Yellow = near capacity (good)
-            else:
-                return "background-colour:#ff6666;colour:white"     # Red = under capacity
-
-        st.dataframe(util_df.style.applymap(colour_util, subset=["Utilisation (%)"]),
-                     use_container_width=True)
-
-        # --- Plotly chart with reversed colour scale ---
-        if PLOTLY_AVAILABLE:
-            fig = px.bar(
-                util_df,
-                x="Machine",
-                y="Utilisation (%)",
-                text_auto=True,
-                color="Utilisation (%)",
-                color_continuous_scale=["red", "yellow", "green"],
-                range_y=[0, 120]
-            )
-            fig.update_traces(textfont_size=12)
-            st.plotly_chart(fig, use_container_width=True)
-
-        # --- Average utilisation gauge ---
+    # --- Average utilisation gauge next to KPIs ---
+    if not util_df.empty and "Utilisation (%)" in util_df.columns:
         avg_util = util_df["Utilisation (%)"].mean(skipna=True)
-        st.markdown("### ⚖️ Average Utilisation Across All Machines")
         if PLOTLY_AVAILABLE and not pd.isna(avg_util):
             gauge_fig = go.Figure(go.Indicator(
                 mode="gauge+number",
@@ -223,10 +193,41 @@ if uploaded_file:
                     ],
                 }
             ))
-            st.plotly_chart(gauge_fig, use_container_width=True)
+            c5.plotly_chart(gauge_fig, use_container_width=True)
 
-        # --- Machine-specific orders ---
-        st.subheader("🧾 Machine-Specific Planned Orders")
+    # --- Utilisation Table and Charts ---
+    st.subheader("⚙️ Estimated Machine Utilisation")
+
+    if not util_df.empty:
+        def colour_util(val):
+            if pd.isna(val):
+                return ""
+            if val > 100:
+                return "background-colour:#66ff66;colour:black"     # Green = over capacity
+            elif val >= 80:
+                return "background-colour:#ffff66;colour:black"     # Yellow = near capacity
+            else:
+                return "background-colour:#ff6666;colour:white"     # Red = under capacity
+
+        st.dataframe(util_df.style.applymap(colour_util, subset=["Utilisation (%)"]),
+                     use_container_width=True)
+
+        if PLOTLY_AVAILABLE:
+            fig = px.bar(
+                util_df,
+                x="Machine",
+                y="Utilisation (%)",
+                text_auto=True,
+                color="Utilisation (%)",
+                color_continuous_scale=["red", "yellow", "green"],
+                range_y=[0, 120]
+            )
+            fig.update_traces(textfont_size=12)
+            st.plotly_chart(fig, use_container_width=True)
+
+    # --- Machine-specific orders ---
+    st.subheader("🧾 Machine-Specific Planned Orders")
+    if machine_col:
         selected_machine = st.selectbox("Select a Machine", ["All Machines"] + sorted(df[machine_col].dropna().unique()))
         subset = df if selected_machine == "All Machines" else df[df[machine_col] == selected_machine]
         if not subset.empty:
