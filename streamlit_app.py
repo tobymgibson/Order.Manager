@@ -61,7 +61,7 @@ if uploaded_file:
                     return col
         return None
 
-    # --- Identify columns ---
+    # --- Identify key columns ---
     col_machine = find_col(["machine"])
     col_customer = find_col(["customer"])
     col_row = find_col(["row"])
@@ -75,7 +75,7 @@ if uploaded_file:
     col_decision = find_col(["run decision"])
     col_value = find_col(["order value", "value"])
 
-    # --- Rename consistently ---
+    # --- Rename columns consistently ---
     rename_map = {
         col_machine: "Machine",
         col_customer: "Customer",
@@ -102,17 +102,24 @@ if uploaded_file:
     if subset:
         df = df.dropna(subset=subset, how="all")
 
+    # --- Force Feeds to numeric ---
+    if "Feeds" in df.columns:
+        df["Feeds"] = pd.to_numeric(df["Feeds"], errors="coerce").fillna(0).astype(float)
+    else:
+        st.error("❌ 'Feeds' column not found. Please ensure column D is labelled 'Feeds'.")
+        st.stop()
+
     # --- Convert numeric columns ---
-    for col in ["Feeds", "Overall_Quantity", "Order_Value"]:
+    for col in ["Overall_Quantity", "Order_Value"]:
         if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
 
     # --- Parse date columns ---
     for col in ["Estimated_Finish", "Earliest_Delivery"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # --- Extract sales order dates from text ---
+    # --- Extract sales order dates ---
     def extract_date(text):
         if not isinstance(text, str):
             return pd.NaT
@@ -141,11 +148,11 @@ if uploaded_file:
         sel_mach = st.sidebar.multiselect("Machine(s)", machines, default=machines)
         df = df[df[machine_col].isin(sel_mach)]
 
-    # --- KPIs + Average Utilisation ---
+    # --- KPIs + Gauge ---
     st.subheader("📊 Key Metrics")
     total_orders = len(df)
-    total_value = df["Order_Value"].sum(skipna=True) if "Order_Value" in df.columns else 0
-    total_feeds = df["Feeds"].sum(skipna=True) if "Feeds" in df.columns else 0
+    total_value = df["Order_Value"].sum(skipna=True)
+    total_feeds = df["Feeds"].sum(skipna=True)
     total_overall_qty = df["Overall_Quantity"].sum(skipna=True) if "Overall_Quantity" in df.columns else 0
 
     c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 2])
@@ -154,7 +161,7 @@ if uploaded_file:
     c3.metric("Total Feeds", f"{int(total_feeds):,}")
     c4.metric("Overall Qty", f"{int(total_overall_qty):,}")
 
-    # --- Utilisation calculations (based on Feeds only) ---
+    # --- Utilisation calculation (Feeds only) ---
     util_data = []
     if machine_col:
         df[machine_col] = df[machine_col].astype(str).str.strip().str.upper()
@@ -163,9 +170,7 @@ if uploaded_file:
             m_code = str(m).strip().upper()
             m_lookup = MACHINE_ALIASES.get(m_code, m_code)
             cap = MACHINE_CAPACITY.get(m_lookup, None)
-
-            # Always use Feeds as the base metric
-            planned_feeds = df.loc[df[machine_col] == m, "Feeds"].sum() if "Feeds" in df.columns else 0
+            planned_feeds = df.loc[df[machine_col] == m, "Feeds"].sum()
 
             if cap:
                 utilisation = (planned_feeds / cap) * 100
@@ -175,7 +180,7 @@ if uploaded_file:
 
     util_df = pd.DataFrame(util_data, columns=["Machine", "Feeds/Day", "Planned Feeds", "Utilisation (%)"])
 
-    # --- Average utilisation gauge next to KPIs ---
+    # --- Average utilisation gauge ---
     if not util_df.empty and "Utilisation (%)" in util_df.columns:
         avg_util = util_df["Utilisation (%)"].mean(skipna=True)
         if PLOTLY_AVAILABLE and not pd.isna(avg_util):
@@ -195,7 +200,7 @@ if uploaded_file:
             ))
             c5.plotly_chart(gauge_fig, use_container_width=True)
 
-    # --- Utilisation Table and Charts ---
+    # --- Utilisation table and chart ---
     st.subheader("⚙️ Estimated Machine Utilisation")
 
     if not util_df.empty:
@@ -245,29 +250,21 @@ if uploaded_file:
         st.subheader("📅 Orders Over Time")
         df_sorted = df.sort_values("Sales_Order_Date")
 
-        value_col = None
-        for candidate in ["Order_Value", "Value", "Order Value"]:
-            if candidate in df_sorted.columns:
-                value_col = candidate
-                break
-
-        if value_col:
+        if "Order_Value" in df_sorted.columns:
             if PLOTLY_AVAILABLE:
                 fig2 = px.line(
                     df_sorted,
                     x="Sales_Order_Date",
-                    y=value_col,
-                    color=machine_col if machine_col in df.columns else None,
+                    y="Order_Value",
+                    color=machine_col,
                     markers=True,
                     title="Orders Over Time"
                 )
                 st.plotly_chart(fig2, use_container_width=True)
             else:
-                st.line_chart(df_sorted.set_index("Sales_Order_Date")[value_col])
-        else:
-            st.info("No value column found to plot orders over time.")
+                st.line_chart(df_sorted.set_index("Sales_Order_Date")["Order_Value"])
 
-    # --- Download button ---
+    # --- Download filtered data ---
     st.download_button("⬇️ Download Filtered Data",
                        df.to_csv(index=False).encode("utf-8"),
                        "filtered_orders.csv",
