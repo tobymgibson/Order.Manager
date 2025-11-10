@@ -1,15 +1,9 @@
 import streamlit as st
 import pandas as pd
-import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 import gspread
 from google.oauth2 import service_account
-
-creds = service_account.Credentials.from_service_account_info(
-    st.secrets["gcp_service_account"],
-    scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-)
 
 # =========================================================
 # Page config
@@ -19,17 +13,13 @@ st.set_page_config(page_title="CTI Production Dashboard", layout="wide")
 # =========================================================
 # Google Sheets connection
 # =========================================================
-# IMPORTANT: In .streamlit/secrets.toml put the whole JSON under:
-# [gcp_service_account]
-# json = """{ ...full service account JSON... }"""
-
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1dLHPyIkZfJby-N-EMXTraJv25BxkauBHS2ycdndC1PY"
-TAB_NAME = "CTI"  # change if your tab is differently named
+TAB_NAME = "CTI"  # change if your tab is named differently
 
 @st.cache_data(show_spinner=False, ttl=120)
 def load_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
     creds = service_account.Credentials.from_service_account_info(
-        json.loads(st.secrets["gcp_service_account"]["json"]),
+        st.secrets["gcp_service_account"],
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
     )
     client = gspread.authorize(creds)
@@ -47,13 +37,12 @@ try:
     df = load_sheet(SHEET_URL, TAB_NAME)
     st.sidebar.success("Connected to Google Sheets ✅")
 except Exception as e:
-    st.sidebar.error(f"Could not load data from Google Sheets.\n{e}")
+    st.sidebar.error(f"⚠️ Could not load data from Google Sheets.\n{e}")
     st.stop()
 
 # =========================================================
 # Standardise columns & clean data
 # =========================================================
-# Normalise headers
 df.columns = (
     df.columns.str.strip()
               .str.replace(" ", "_")
@@ -61,13 +50,12 @@ df.columns = (
               .str.replace(r"__+", "_", regex=True)
 )
 
-def pick_col(dframe: pd.DataFrame, options) -> str | None:
+def pick_col(dframe: pd.DataFrame, options):
     for name in options:
         if name in dframe.columns:
             return name
     return None
 
-# Likely column names (tolerant to variations)
 col_machine = pick_col(df, ["Machine", "machine"])
 col_customer = pick_col(df, ["Customer", "Customer_Name", "Cust_name"])
 col_row = pick_col(df, ["ROW", "Row", "Spec_Number"])
@@ -90,7 +78,6 @@ rename_map = {
 rename_map = {k: v for k, v in rename_map.items() if k}
 df = df.rename(columns=rename_map)
 
-# Numeric cleaning
 def to_number(s):
     return pd.to_numeric(
         pd.Series(s, dtype="object").astype(str).str.replace(r"[^0-9\.\-]", "", regex=True),
@@ -101,9 +88,7 @@ for col in ["Feeds", "Quantity", "Order_Value"]:
     if col in df.columns:
         df[col] = to_number(df[col]).fillna(0)
 
-# Finish -> datetime
 if "Finish" in df.columns:
-    # Try parsing with both dayfirst and default to be safe
     parsed = pd.to_datetime(df["Finish"], errors="coerce")
     still_na = parsed.isna()
     if still_na.any():
@@ -111,23 +96,18 @@ if "Finish" in df.columns:
         parsed.loc[still_na] = parsed2
     df["Finish"] = parsed
 
-# Drop rows without machine label (filler rows)
 if "Machine" in df.columns:
     df = df.dropna(subset=["Machine"], how="all")
 
 # =========================================================
 # Session state for local-only deletions
 # =========================================================
-# We'll use the ROW field (if present) as a stable primary key for deletion.
-# If missing, fall back to a composite key.
 def build_key_col(dframe: pd.DataFrame) -> pd.Series:
     if "ROW" in dframe.columns:
         return dframe["ROW"].astype(str)
-    # Fallback composite key
     parts = []
     for p in ["Machine", "Customer", "Finish", "Feeds", "Quantity", "Order_Value"]:
         parts.append(dframe[p].astype(str) if p in dframe.columns else "")
-    # simple hash-like join
     return (parts[0] + "|" + parts[1] + "|" + parts[2] + "|" + parts[3] + "|" + parts[4] + "|" + (parts[5] if len(parts) > 5 else ""))
 
 df["_RowKey"] = build_key_col(df)
