@@ -14,7 +14,7 @@ st.set_page_config(page_title="CTI Production Dashboard", layout="wide")
 # Google Sheets connection
 # =========================================================
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1dLHPyIkZfJby-N-EMXTraJv25BxkauBHS2ycdndC1PY"
-TAB_NAME = "CTI"  # change if your tab is named differently
+TAB_NAME = "CTI"
 
 @st.cache_data(show_spinner=False, ttl=120)
 def load_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
@@ -28,7 +28,6 @@ def load_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
     data = ws.get_all_records()
     return pd.DataFrame(data)
 
-# Load data (with button to force reload)
 reload = st.sidebar.button("🔄 Refresh data")
 if reload:
     st.cache_data.clear()
@@ -41,7 +40,7 @@ except Exception as e:
     st.stop()
 
 # =========================================================
-# Standardise columns & clean data
+# Clean and normalise data
 # =========================================================
 df.columns = (
     df.columns.str.strip()
@@ -88,19 +87,15 @@ for col in ["Feeds", "Quantity", "Order_Value"]:
     if col in df.columns:
         df[col] = to_number(df[col]).fillna(0)
 
+# --- Force UK-style (day-first) date parsing ---
 if "Finish" in df.columns:
-    parsed = pd.to_datetime(df["Finish"], errors="coerce")
-    still_na = parsed.isna()
-    if still_na.any():
-        parsed2 = pd.to_datetime(df.loc[still_na, "Finish"], errors="coerce", dayfirst=True)
-        parsed.loc[still_na] = parsed2
-    df["Finish"] = parsed
+    df["Finish"] = pd.to_datetime(df["Finish"], errors="coerce", dayfirst=True)
 
 if "Machine" in df.columns:
     df = df.dropna(subset=["Machine"], how="all")
 
 # =========================================================
-# Session state for local-only deletions
+# Session state (local-only deletions)
 # =========================================================
 def build_key_col(dframe: pd.DataFrame) -> pd.Series:
     if "ROW" in dframe.columns:
@@ -111,16 +106,14 @@ def build_key_col(dframe: pd.DataFrame) -> pd.Series:
     return (parts[0] + "|" + parts[1] + "|" + parts[2] + "|" + parts[3] + "|" + parts[4] + "|" + (parts[5] if len(parts) > 5 else ""))
 
 df["_RowKey"] = build_key_col(df)
-
 if "locally_deleted_keys" not in st.session_state:
     st.session_state.locally_deleted_keys = set()
 
 # =========================================================
-# Top bar + metrics
+# Top metrics
 # =========================================================
 st.title("🏭 CTI Production Dashboard")
 
-# KPI row
 total_orders = len(df)
 total_value = df["Order_Value"].sum() if "Order_Value" in df.columns else 0
 machine_count = df["Machine"].nunique() if "Machine" in df.columns else 0
@@ -133,37 +126,32 @@ m3.metric("Machines Active", machine_count)
 st.divider()
 
 # =========================================================
-# Overall Machine Utilisation (averaged per day across all planned orders)
+# Overall Machine Utilisation
 # =========================================================
 st.subheader("⚙️ Overall Machine Utilisation Across All Planned Orders")
 
-# Machine daily capacities (feeds/day)
 machine_capacity = {
     "BO1": 24000,
     "KO1": 50000,
     "KO3": 15000,
     "JC1": 48000,
-    "JC": 48000,   # alias case
+    "JC": 48000,
     "TCY": 9000,
 }
 
 util_df = pd.DataFrame(columns=["Machine", "Avg_Feeds_per_Day", "Capacity_Feeds_per_Day", "Utilisation_%"])
 
-if "Machine" in df.columns and "Feeds" in df.columns and "Finish" in df.columns:
-    # Prepare per-day totals: sum Feeds per (Machine, date)
+if {"Machine", "Feeds", "Finish"}.issubset(df.columns):
     day_df = df.dropna(subset=["Finish"]).copy()
     day_df["Finish_Date"] = day_df["Finish"].dt.date
     group = day_df.groupby(["Machine", "Finish_Date"], as_index=False)["Feeds"].sum()
 
-    # For each machine, average of daily totals
     rows = []
     for m, cap in machine_capacity.items():
-        # JC alias support: treat both "JC" and "JC1" as one, but show as "JC1" if exists otherwise "JC"
         if m == "JC1":
             m_slice = group[group["Machine"].isin(["JC1", "JC"])]
             label = "JC1"
         elif m == "JC":
-            # Skip JC here (already counted with JC1), unless JC1 never appears in data
             continue
         else:
             m_slice = group[group["Machine"] == m]
@@ -182,7 +170,6 @@ if "Machine" in df.columns and "Feeds" in df.columns and "Finish" in df.columns:
         util_df = pd.DataFrame(rows)
 
 def colour_util(val):
-    # Better to be closer to capacity (higher is greener)
     if pd.isna(val):
         return ""
     if val >= 95:
@@ -192,21 +179,17 @@ def colour_util(val):
     return "background-color: red; color: white;"
 
 if not util_df.empty:
-    st.dataframe(
-        util_df.style.map(colour_util, subset=["Utilisation_%"]),
-        use_container_width=True
-    )
+    st.dataframe(util_df.style.map(colour_util, subset=["Utilisation_%"]), use_container_width=True)
 else:
     st.info("No utilisation data available (check Machine / Feeds / Finish columns).")
 
 st.divider()
 
 # =========================================================
-# Filters panel (date range + machine + sort)
+# Filters (Date + Machine)
 # =========================================================
 st.subheader("📅 Orders Scheduled to Finish in Selected Range")
 
-# Date filter
 if "Finish" in df.columns:
     min_date = df["Finish"].min().date() if not df["Finish"].isna().all() else date.today()
     max_date = df["Finish"].max().date() if not df["Finish"].isna().all() else date.today()
@@ -217,7 +200,8 @@ date_selection = st.date_input(
     "Select date range:",
     value=(min_date, max_date),
     min_value=min_date,
-    max_value=max_date
+    max_value=max_date,
+    format="DD/MM/YYYY"
 )
 
 if isinstance(date_selection, (list, tuple)):
@@ -230,53 +214,43 @@ if isinstance(date_selection, (list, tuple)):
 else:
     start_date = end_date = date_selection
 
-# Machine dropdown
-machines_available = sorted(df["Machine"].dropna().unique().tolist()) if "Machine" in df.columns else []
+# Filter by selected date range first
+filtered_pre_machine = df.copy()
+if "Finish" in filtered_pre_machine.columns and not filtered_pre_machine["Finish"].isna().all():
+    filtered_pre_machine = filtered_pre_machine[
+        (filtered_pre_machine["Finish"].dt.date >= start_date) &
+        (filtered_pre_machine["Finish"].dt.date <= end_date)
+    ]
+
+# Only show machines that have data in this range
+machines_available = sorted(filtered_pre_machine["Machine"].dropna().unique().tolist()) if "Machine" in filtered_pre_machine.columns else []
 selected_machine = st.selectbox("Filter by Machine", ["All Machines"] + machines_available)
 
-# Sort order
 sort_order = st.radio("Sort by Finish Date:", ["Earliest first", "Latest first"], horizontal=True)
 
 # =========================================================
 # Apply filters + local deletions
 # =========================================================
-filtered = df.copy()
+filtered = filtered_pre_machine.copy()
 
-# Date filter (only if Finish exists)
-if "Finish" in filtered.columns and not filtered["Finish"].isna().all():
-    filtered = filtered[
-        (filtered["Finish"].dt.date >= start_date) &
-        (filtered["Finish"].dt.date <= end_date)
-    ]
-
-# Machine filter
 if selected_machine != "All Machines" and "Machine" in filtered.columns:
     filtered = filtered[filtered["Machine"] == selected_machine]
 
-# Sort
 if "Finish" in filtered.columns:
-    filtered = filtered.sort_values(
-        by="Finish",
-        ascending=(sort_order == "Earliest first")
-    )
+    filtered = filtered.sort_values(by="Finish", ascending=(sort_order == "Earliest first"))
 
-# Drop locally deleted rows by key
 if "_RowKey" in filtered.columns and st.session_state.locally_deleted_keys:
     filtered = filtered[~filtered["_RowKey"].isin(st.session_state.locally_deleted_keys)]
 
 # =========================================================
-# Risk parsing from Next_Uncovered_Order
+# Risk column logic
 # =========================================================
 def parse_next_shortage(text: str):
-    """Return ('Low', None) for 'All covered', else ('High'/'Medium', shortage_date, days)"""
     if not isinstance(text, str) or text.strip() == "":
         return ("Unknown", None, None)
-
     lower = text.lower()
     if "all covered" in lower:
         return ("Low", None, None)
-
-    # Look for dd/mm/YYYY inside text
     m = re.search(r"(\d{2})/(\d{2})/(\d{4})", text)
     if m:
         try:
@@ -300,24 +274,17 @@ def risk_badge(risk_tuple):
         return f"🟠 Shortage in {days}d" if days is not None else "🟠 Shortage upcoming"
     return "⚪ Unknown"
 
-# Build Risk column (plain text for data_editor compatibility)
 if "Next_Uncovered_Order" in filtered.columns:
     risks = filtered["Next_Uncovered_Order"].apply(parse_next_shortage)
     filtered = filtered.assign(Risk=risks.apply(risk_badge))
 
 # =========================================================
-# Totals and display
+# Display + Local Delete
 # =========================================================
-# Preferred columns to show
-preferred_cols = [
-    "Machine", "Customer", "ROW", "Feeds", "Quantity",
-    "Finish", "Next_Uncovered_Order", "Risk", "Order_Value"
-]
+preferred_cols = ["Machine", "Customer", "ROW", "Feeds", "Quantity", "Finish", "Next_Uncovered_Order", "Risk", "Order_Value"]
 show_cols = [c for c in preferred_cols if c in filtered.columns]
 
-# Value of the current view
 visible_total_value = filtered["Order_Value"].sum() if "Order_Value" in filtered.columns else 0.0
-
 cA, cB = st.columns([3, 1])
 with cA:
     st.markdown(f"**💰 Total Value of Orders in View:** £{visible_total_value:,.2f}")
@@ -330,16 +297,13 @@ with cB:
         use_container_width=True,
     )
 
-# Add local delete checkbox column for editing
 if not filtered.empty:
     display_df = filtered.copy()
     display_df["Delete?"] = False
+    cols_order = (["Delete?"] + show_cols)
+    cols_order = [c for c in cols_order if c in display_df.columns]
 
-    # Reorder so Delete? is first
-    cols_order = (["Delete?"] + show_cols) if show_cols else display_df.columns.tolist()
-    cols_order = [c for c in cols_order if c in display_df.columns]  # safe guard
-
-    st.caption("Tick the rows you want to hide locally, then click **Delete Selected (Local Only)**.")
+    st.caption("Tick rows to hide locally, then click **Delete Selected (Local Only)**.")
     edited = st.data_editor(
         display_df[cols_order],
         use_container_width=True,
@@ -348,18 +312,13 @@ if not filtered.empty:
         hide_index=True
     )
 
-    # Which rows to locally delete?
     to_delete_keys = set()
     if "Delete?" in edited.columns:
-        # We need the keys from original filtered; rebuild keys for edited frame
-        # Recompute key on edited side using the same rule:
         edited_key = build_key_col(edited.rename(columns={"_RowKey": "_RowKey"}))
-        # Create mask of rows ticked for deletion
         mask = (edited["Delete?"] == True)
         if mask.any():
             to_delete_keys = set(edited_key[mask].astype(str).tolist())
 
-    # Buttons
     b1, b2 = st.columns(2)
     with b1:
         if st.button("🗑️ Delete Selected (Local Only)"):
@@ -377,10 +336,7 @@ if not filtered.empty:
 else:
     st.info("No orders match the current filters.")
 
-# Footer hint
 st.markdown(
-    "<div style='color:#888;margin-top:12px;'>"
-    "Note: Deletions are local to this session only. Refresh or click “Reset Deleted Rows” to restore."
-    "</div>",
+    "<div style='color:#888;margin-top:12px;'>Note: Deletions are local only. Refresh or click “Reset Deleted Rows” to restore.</div>",
     unsafe_allow_html=True
 )
