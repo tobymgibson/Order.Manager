@@ -1,228 +1,212 @@
 import streamlit as st
 import pandas as pd
 import gspread
-from google.oauth2.service_account import Credentials
-from datetime import datetime, timedelta
-import re
+from google.oauth2 import service_account
+from datetime import date
 
-# =====================================
+# --------------------------
+# PAGE SETUP
+# --------------------------
+st.set_page_config(page_title="CTI Production Dashboard", layout="wide")
+
+# --------------------------
 # GOOGLE SHEETS CONNECTION
-# =====================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/1dLHPyIkZfJby-N-EMXTraJv25BxkauBHS2ycdndC1PY/edit?gid=542956255#gid=542956255"
-
+# --------------------------
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+creds = service_account.Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"], scopes=scope
+)
 client = gspread.authorize(creds)
 
-@st.cache_data(ttl=120)
-def load_gsheet_data():
-    """Load and clean Google Sheet data"""
-    try:
-        sh = client.open_by_url(SHEET_URL)
-        worksheet = sh.sheet1
-        data = worksheet.get_all_records()
-        df = pd.DataFrame(data)
-        df = df[df.astype(str).apply(lambda x: "".join(x).strip() != "", axis=1)]
-        return df
-    except Exception as e:
-        st.error(f"⚠️ Could not load data from Google Sheets: {e}")
-        return pd.DataFrame()
+# Google Sheet URL and tab
+sheet_url = "https://docs.google.com/spreadsheets/d/1dLHPyIkZfJby-N-EMXTraJv25BxkauBHS2ycdndC1PY"
+spreadsheet = client.open_by_url(sheet_url)
+worksheet = spreadsheet.worksheet("CTI")
 
-df = load_gsheet_data()
-if df.empty:
-    st.stop()
+# --------------------------
+# LOAD AND CLEAN DATA
+# --------------------------
+data = worksheet.get_all_records()
+df = pd.DataFrame(data)
+df.columns = df.columns.str.strip().str.replace(" ", "_").str.replace("-", "_")
 
-# =====================================
-# PAGE SETUP
-# =====================================
-st.set_page_config(page_title="Production Dashboard", layout="wide")
-st.title("🏭 Live Production Planning Dashboard")
-st.caption(f"Connected to Google Sheets • Updated {datetime.now():%d %b %Y, %H:%M}")
-
-# =====================================
-# MACHINE SETTINGS
-# =====================================
-MACHINE_CAPACITY = {"BO1": 24000, "KO1": 50000, "JC1": 48000, "TCY": 9000, "KO3": 15000}
-
-# =====================================
-# HELPER FUNCTIONS
-# =====================================
-def clean_numeric(series):
-    s = series.astype(str).fillna("")
-    s = s.str.replace(r"[£$,]", "", regex=True).str.replace(r"[^\d.\-]", "", regex=True)
-    s = s.replace("", "0")
-    return pd.to_numeric(s, errors="coerce").fillna(0)
-
-def extract_date_from_text(text):
-    if not isinstance(text, str):
-        return None
-    m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", text)
-    if m:
-        try:
-            return datetime.strptime(m.group(1), "%d/%m/%Y")
-        except:
-            return None
+def find_column(possible_names):
+    for name in possible_names:
+        if name in df.columns:
+            return name
     return None
 
-def risk_level(val):
-    if pd.isna(val) or not str(val).strip():
-        return "Unknown"
-    text = str(val).lower()
-    if "all covered" in text:
-        return "All Covered"
-    date = extract_date_from_text(val)
-    if date:
-        if date.date() <= (datetime.now().date() + timedelta(days=3)):
-            return "Urgent"
-        else:
-            return "Future"
-    return "Future"
-
-def risk_flag(val):
-    r = risk_level(val)
-    return {
-        "Urgent": "🔴 Urgent",
-        "Future": "🟡 Future",
-        "All Covered": "✅ Covered",
-        "Unknown": "❔",
-    }[r]
-
-def apply_util_colour(val):
-    if pd.isna(val): return ""
-    if val > 100: return "background-color: #00cc00; color: black;"
-    if val >= 80: return "background-color: #ffff66; color: black;"
-    return "background-color: #ff6666; color: white;"
-
-# =====================================
-# CLEANUP AND NORMALISE DATA
-# =====================================
-df.columns = df.columns.astype(str).str.strip()
+machine_col = find_column(["Machine", "machine"])
+customer_col = find_column(["Customer", "Customer_Name"])
+feeds_col = find_column(["Feeds", "Feed"])
+quantity_col = find_column(["Quantity", "Qty"])
+finish_col = find_column(["Finish", "Estimated_Finish"])
+next_order_col = find_column(["Next_Uncovered_Order", "Next_Shortage"])
+order_value_col = find_column(["Order_Value", "Value"])
 
 rename_map = {
-    "Machine": "Machine",
-    "Customer": "Customer",
-    "Feeds": "Feeds",
-    "Finish": "Finish",
-    "Works Order": "Works_Order",
-    "Value": "Order_Value",
-    "Next Uncovered Order": "Next_Uncovered_Order",
+    machine_col: "Machine",
+    customer_col: "Customer",
+    feeds_col: "Feeds",
+    quantity_col: "Quantity",
+    finish_col: "Finish",
+    next_order_col: "Next_Uncovered_Order",
+    order_value_col: "Order_Value",
 }
-df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+rename_map = {k: v for k, v in rename_map.items() if k}
+df.rename(columns=rename_map, inplace=True)
 
-# Fill down machine names (fixing the blank rows)
-if "Machine" in df.columns:
-    df["Machine"] = df["Machine"].ffill().astype(str).str.upper()
-
-if "Customer" in df.columns:
-    df["Customer"] = df["Customer"].astype(str).str.upper()
-
-for col in ["Feeds", "Order_Value"]:
+# Ensure numeric conversion
+for col in ["Feeds", "Quantity", "Order_Value"]:
     if col in df.columns:
-        df[col] = clean_numeric(df[col])
+        df[col] = (
+            pd.to_numeric(df[col].astype(str).str.replace("[^0-9.-]", "", regex=True), errors="coerce")
+            .fillna(0)
+        )
 
+# Convert Finish column
 if "Finish" in df.columns:
     df["Finish"] = pd.to_datetime(df["Finish"], errors="coerce")
 
-if "Next_Uncovered_Order" in df.columns:
-    df["Next_Shortage_Date"] = df["Next_Uncovered_Order"].apply(extract_date_from_text)
+# Drop rows with no machine
+if "Machine" in df.columns:
+    df = df.dropna(subset=["Machine"], how="all")
 
-# Filter out blanks
-df = df[df["Machine"].notna() & (df["Feeds"] > 0)]
+# --------------------------
+# DASHBOARD METRICS
+# --------------------------
+st.title("🏭 CTI Production Overview")
 
-# =====================================
-# OVERALL MACHINE UTILISATION
-# =====================================
-st.subheader("Overall Machine Utilisation Across All Planned Orders")
+total_feeds = int(df["Feeds"].sum()) if "Feeds" in df.columns else 0
+total_value = df["Order_Value"].sum() if "Order_Value" in df.columns else 0
+machines = df["Machine"].nunique() if "Machine" in df.columns else 0
 
-utilisation_data = (
-    df.groupby(["Machine", df["Finish"].dt.date])["Feeds"]
-    .sum()
-    .reset_index()
-    .groupby("Machine")["Feeds"]
-    .mean()
-    .reset_index(name="Avg_Feeds_Per_Day")
-)
+col1, col2, col3 = st.columns(3)
+col1.metric("Total Feeds Planned", f"{total_feeds:,}")
+col2.metric("Total Order Value (£)", f"£{total_value:,.2f}")
+col3.metric("Machines Active", machines)
 
-util_rows = []
-for _, row in utilisation_data.iterrows():
-    machine = row["Machine"]
-    avg = row["Avg_Feeds_Per_Day"]
-    capacity = MACHINE_CAPACITY.get(machine)
-    if capacity:
-        util = (avg / capacity) * 100
-        util_rows.append((machine, capacity, round(avg, 1), round(util, 1)))
+st.divider()
 
-util_df = pd.DataFrame(util_rows, columns=["Machine", "Feeds/Day Capacity", "Average Planned Feeds", "Utilisation (%)"])
-util_df = util_df.sort_values("Machine").reset_index(drop=True)
+# --------------------------
+# MACHINE UTILISATION
+# --------------------------
+machine_capacity = {
+    "BO1": 24000, "KO1": 50000, "KO3": 15000, "JC1": 48000, "JC": 48000, "TCY": 9000,
+}
+avg_util = []
+if "Machine" in df.columns and "Feeds" in df.columns:
+    for m, cap in machine_capacity.items():
+        m_df = df[df["Machine"] == m]
+        if not m_df.empty:
+            avg_feeds = m_df["Feeds"].mean()
+            util = (avg_feeds / cap) * 100 if cap > 0 else 0
+            avg_util.append({
+                "Machine": m,
+                "Avg Feeds/Day": round(avg_feeds, 0),
+                "Capacity (Feeds/Day)": cap,
+                "Utilisation (%)": round(util, 1)
+            })
+avg_util_df = pd.DataFrame(avg_util)
 
-st.dataframe(util_df.style.applymap(apply_util_colour, subset=["Utilisation (%)"]), use_container_width=True)
+def highlight_util(val):
+    colour = "green" if val > 95 else "orange" if val > 80 else "red"
+    return f"background-color: {colour}; color: white;"
 
-# =====================================
-# ORDERS TABLE SECTION
-# =====================================
-st.header("Orders Scheduled to Finish in Selected Range")
+if not avg_util_df.empty:
+    st.subheader("⚙️ Overall Machine Utilisation Across All Planned Orders")
+    st.dataframe(
+        avg_util_df.style.map(highlight_util, subset=["Utilisation (%)"]),
+        use_container_width=True
+    )
 
-min_date, max_date = df["Finish"].min().date(), df["Finish"].max().date()
-date_selection = st.date_input(
-    "Select date range:",
-    value=(min_date, min_date),
-    min_value=min_date,
-    max_value=max_date,
-)
+st.divider()
 
-# Parse selected range
-if isinstance(date_selection, tuple):
-    if len(date_selection) == 2:
-        start_date, end_date = date_selection
+# --------------------------
+# FILTERS AND SORTING
+# --------------------------
+st.subheader("📅 Orders Scheduled to Finish in Selected Range")
+
+if "Finish" in df.columns:
+    min_date = df["Finish"].min().date() if not df["Finish"].isna().all() else date.today()
+    max_date = df["Finish"].max().date() if not df["Finish"].isna().all() else date.today()
+
+    date_selection = st.date_input(
+        "Select date range:",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date
+    )
+
+    if isinstance(date_selection, (list, tuple)):
+        if len(date_selection) == 2:
+            start_date, end_date = date_selection
+        else:
+            start_date = end_date = date_selection[0]
     else:
-        start_date = end_date = date_selection[0]
+        start_date = end_date = date_selection
+
+    date_filtered_df = df[
+        (df["Finish"].dt.date >= start_date) & (df["Finish"].dt.date <= end_date)
+    ].copy()
 else:
-    start_date = end_date = date_selection
+    date_filtered_df = df.copy()
 
-filtered_df = df[(df["Finish"].dt.date >= start_date) & (df["Finish"].dt.date <= end_date)].copy()
-
-if filtered_df.empty:
-    st.info(f"No orders found between {start_date:%d %b %Y} and {end_date:%d %b %Y}.")
-    st.stop()
-
-# Dropdown machine selection
-available_machines = sorted(filtered_df["Machine"].dropna().unique())
-selected_machine = st.selectbox("Select machine to view:", options=["All Machines"] + available_machines, index=0)
+machines_available = sorted(df["Machine"].dropna().unique().tolist())
+selected_machine = st.selectbox("Select Machine:", ["All Machines"] + machines_available)
 
 if selected_machine != "All Machines":
-    filtered_day_df = filtered_df[filtered_df["Machine"] == selected_machine].copy()
+    filtered_day_df = date_filtered_df[date_filtered_df["Machine"] == selected_machine]
 else:
-    filtered_day_df = filtered_df.copy()
+    filtered_day_df = date_filtered_df.copy()
 
-# Calculate metrics
-total_orders = len(filtered_day_df)
-total_feeds = filtered_day_df["Feeds"].sum(skipna=True)
-total_value = filtered_day_df["Order_Value"].sum(skipna=True)
+sort_order = st.radio("Sort by Finish Date:", ["Earliest first", "Latest first"], horizontal=True)
+if "Finish" in filtered_day_df.columns:
+    filtered_day_df = filtered_day_df.sort_values(
+        by="Finish",
+        ascending=True if sort_order == "Earliest first" else False
+    )
 
-c1, c2, c3 = st.columns(3)
-c1.metric("Orders Planned", total_orders)
-c2.metric("Total Feeds", f"{int(total_feeds):,}")
-c3.metric("Total Value", f"£{total_value:,.0f}")
+# --------------------------
+# LOCAL DELETE FEATURE
+# --------------------------
+if "deleted_rows" not in st.session_state:
+    st.session_state.deleted_rows = []
 
-# Add colour-coded risk
-filtered_day_df["Risk_Flag"] = filtered_day_df["Next_Uncovered_Order"].apply(risk_flag)
+if not filtered_day_df.empty:
+    filtered_day_df["Delete?"] = False  # Add checkbox column
 
-# Editable table
-st.markdown("### Orders List (Editable)")
-editable_df = filtered_day_df.copy()
-editable_df["Delete?"] = False
+    preferred_cols = [
+        "Delete?", "Machine", "Customer", "ROW", "Feeds", "Quantity",
+        "Finish", "Next_Uncovered_Order", "Order_Value"
+    ]
+    show_cols = [c for c in preferred_cols if c in filtered_day_df.columns]
 
-edited = st.data_editor(
-    editable_df,
-    use_container_width=True,
-    hide_index=True,
-    num_rows="fixed",
-)
+    # Remove any rows that were previously deleted locally
+    display_df = filtered_day_df[~filtered_day_df.index.isin(st.session_state.deleted_rows)]
 
-if st.button("🗑️ Delete Selected Rows"):
-    delete_idx = edited[edited["Delete?"] == True].index
-    if len(delete_idx) > 0:
-        df = df.drop(delete_idx)
-        st.success(f"Deleted {len(delete_idx)} rows.")
-    else:
-        st.info("No rows selected for deletion.")
+    total_visible_value = display_df["Order_Value"].sum()
+    st.markdown(f"**💰 Total Value of Orders in View:** £{total_visible_value:,.2f}")
+
+    edited_df = st.data_editor(
+        display_df[show_cols],
+        use_container_width=True,
+        num_rows="fixed",
+        key="editable_table"
+    )
+
+    if st.button("🗑️ Delete Selected Rows (Local Only)"):
+        to_delete = edited_df[edited_df["Delete?"] == True]
+        if not to_delete.empty:
+            st.session_state.deleted_rows.extend(to_delete.index)
+            st.success("✅ Selected rows removed locally.")
+            st.rerun()
+        else:
+            st.info("No rows selected for deletion.")
+
+    if st.button("🔄 Reset Deleted Rows"):
+        st.session_state.deleted_rows = []
+        st.success("✅ All deleted rows have been restored.")
+        st.rerun()
+else:
+    st.info("No orders found for the selected filters.")
