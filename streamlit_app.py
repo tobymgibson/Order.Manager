@@ -5,7 +5,6 @@ import re
 from datetime import date, datetime, timedelta
 import gspread
 from google.oauth2 import service_account
-import json
 
 creds = service_account.Credentials.from_service_account_info(
     st.secrets["gcp_service_account"],
