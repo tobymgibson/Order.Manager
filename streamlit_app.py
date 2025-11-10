@@ -398,6 +398,4 @@ st.markdown(
     "Note: Deletions are local to this session only. Refresh or click “Reset Deleted Rows” to restore."
     "</div>",
     unsafe_allow_html=True
-)git add .streamlit/secrets.toml streamlit_app.py
-git commit -m "Fix Google Sheets connection"
-git push
+)
