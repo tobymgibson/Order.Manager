@@ -8,8 +8,8 @@ from google.oauth2 import service_account
 import json
 
 creds = service_account.Credentials.from_service_account_info(
-    json.loads(st.secrets["gcp_service_account"]["json"]),
-    scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    st.secrets["gcp_service_account"],
+    scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
 )
 
 # =========================================================
