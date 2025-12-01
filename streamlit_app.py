@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime
 import gspread
 from google.oauth2 import service_account
-import json  # <--- needed for secrets JSON
+
 
 # =========================================================
 # Page config
@@ -20,19 +20,29 @@ TAB_NAME = "CTI"
 
 # Progroup POs – separate workbook
 PO_SHEET_URL = "https://docs.google.com/spreadsheets/d/1Ct5jXkpG6x13AnQeJ12589jj2ZCe7f3EERTU77KEYhQ"
-PO_TAB_NAME = "Progroup_POs"  # must match tab name exactly
+PO_TAB_NAME = "Progroup_POs"  # must match the tab name exactly
 
-
+# ---------- Credentials from Streamlit secrets ----------
 def _get_creds():
     """
     Load Google service account credentials from Streamlit secrets.
-    In your Secrets page you should have:
+
+    Expects secrets.toml to contain:
 
     [google]
-    service_account_json = \"\"\"{ ...full JSON... }\"\"\"
+    type = "service_account"
+    project_id = "cti-production-dashboard"
+    private_key_id = "..."
+    private_key = \"\"\"-----BEGIN PRIVATE KEY-----
+    ...
+    -----END PRIVATE KEY-----\"\"\"
+    client_email = "..."
+    token_uri = "https://oauth2.googleapis.com/token"
+    ...
     """
+    info = dict(st.secrets["google"])
     return service_account.Credentials.from_service_account_info(
-        json.loads(st.secrets["google"]["service_account_json"]),
+        info,
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
     )
 
@@ -51,7 +61,7 @@ def load_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False, ttl=120)
 def load_po_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
     """
-    Load the Progroup POs sheet, but intelligently find the correct header row
+    Load the Progroup POs sheet and automatically detect the correct header row
     (the row containing Supplier_Name and PO_Number).
     """
     creds = _get_creds()
@@ -59,19 +69,19 @@ def load_po_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
     ss = client.open_by_url(_sheet_url)
     ws = ss.worksheet(_tab)
 
-    # Get ALL values, including any junk/hidden rows above the real header
+    # Get all rows (including any junk/hidden rows above the real header)
     values = ws.get_all_values()
     if not values:
         return pd.DataFrame()
 
-    # Find row that has both Supplier_Name and PO_Number
+    # Find header row (contains Supplier_Name and PO_Number)
     header_idx = None
     for i, row in enumerate(values):
         if "Supplier_Name" in row and "PO_Number" in row:
             header_idx = i
             break
 
-    # Fallback to first row if we don't find a better header
+    # If nothing found, default to first row
     if header_idx is None:
         header = values[0]
         data_rows = values[1:]
@@ -105,82 +115,7 @@ try:
 except Exception as e:
     st.sidebar.warning(f"⚠️ Could not load data from Progroup POs sheet.\n{e}")
 
-    # Get ALL values (rows), including header and any junk rows above it
-    values = ws.get_all_values()
-    if not values:
-        return pd.DataFrame()
-
-    # Find the row that contains the actual PO headers
-    header_idx = None
-    for i, row in enumerate(values):
-        if "Supplier_Name" in row and "PO_Number" in row:
-            header_idx = i
-            break
-
-    # If not found, fall back to first row
-    if header_idx is None:
-        header = values[0]
-        data_rows = values[1:]
-    else:
-        header = values[header_idx]
-        data_rows = values[header_idx + 1:]
-
-    return pd.DataFrame(data_rows, columns=header)
-
-    # Get all raw values (no header interpretation)
-    values = ws.get_all_values()
-    if not values:
-        return pd.DataFrame()
-
-    # Try to find the row that contains Supplier_Name AND PO_Number
-    header_idx = None
-    for i, row in enumerate(values):
-        if "Supplier_Name" in row and "PO_Number" in row:
-            header_idx = i
-            break
-
-    # Fallback: first row if we didn't find a better header
-    if header_idx is None:
-        header = values[0]
-        data_rows = values[1:]
-    else:
-        header = values[header_idx]
-        data_rows = values[header_idx + 1:]
-
-    # Build DataFrame
-    df_po = pd.DataFrame(data_rows, columns=header)
-
-    return df_po
-
-    # THESE TWO LINES MUST USE THE FUNCTION ARGUMENTS
-    ss = client.open_by_url(_sheet_url)
-    ws = ss.worksheet(_tab)
-
-    data = ws.get_all_records()
-    return pd.DataFrame(data)
-
-
-reload = st.sidebar.button("🔄 Refresh data")
-if reload:
-    st.cache_data.clear()
-
-# ------------ Production sheet ------------
-try:
-    df = load_sheet(SHEET_URL, TAB_NAME)
-    st.sidebar.success("Connected to CTI Production Sheet ✅")
-except Exception as e:
-    st.sidebar.error(f"⚠️ Could not load data from Production Google Sheet.\n{e}")
-    st.stop()
-
-# ------------ Purchase order sheet ------------
-po_df = None
-try:
-    po_df = load_po_sheet(PO_SHEET_URL, PO_TAB_NAME)  # NOTE: load_po_sheet here
-    st.sidebar.success("Connected to Progroup POs Sheet ✅")
-except Exception as e:
-    st.sidebar.warning(f"⚠️ Could not load data from Progroup POs sheet.\n{e}")
-
-# =========================================================
+    # =========================================================
 # Clean and normalise CTI production data
 # =========================================================
 df.columns = (
@@ -514,7 +449,7 @@ else:
                      .str.replace(r"__+", "_", regex=True)
     )
 
-    # Expected headers from your screenshot:
+    # Expected headers from your PO sheet:
     # Supplier_Name, PO_Number, Acknowledge_Date, Supplier_Trip_No,
     # Product_Code, Qty_Ordered, Qty_Delivered, Qty_Outstanding,
     # Free_Stock, Orig_Due_Date, Current_Due_Date, Difference,
@@ -533,6 +468,10 @@ else:
         "Active_Works_Orders": "Active_Works_Orders",
     }
     po_df = po_df.rename(columns={k: v for k, v in po_rename_map.items() if k in po_df.columns})
+
+    # Create Customer alias from Supplier if no Customer column
+    if "Customer" not in po_df.columns and "Supplier" in po_df.columns:
+        po_df["Customer"] = po_df["Supplier"]
 
     # -----------------------------
     # Clean numeric & date fields
@@ -609,69 +548,73 @@ else:
             (po_filtered["Current_Due_Date"].dt.date <= po_end)
         ]
 
-# -----------------------------
-# Product filter (search + dropdown)
-# -----------------------------
-if "Product_Code" in po_filtered.columns:
-    product_search = st.text_input(
-        "Search Product Code (partial match):",
-        value="",
-        key="po_product_search",
-        placeholder="Type part of a product code..."
-    )
+    # -----------------------------
+    # Product filter (search + dropdown)
+    # -----------------------------
+    if "Product_Code" in po_filtered.columns:
+        product_search = st.text_input(
+            "Search Product Code (partial match):",
+            value="",
+            key="po_product_search",
+            placeholder="Type part of a product code..."
+        )
 
-    if product_search.strip():
-        po_filtered = po_filtered[
-            po_filtered["Product_Code"]
-            .astype(str)
-            .str.contains(product_search.strip(), case=False, na=False)
-        ]
+        if product_search.strip():
+            po_filtered = po_filtered[
+                po_filtered["Product_Code"]
+                .astype(str)
+                .str.contains(product_search.strip(), case=False, na=False)
+            ]
 
-    products_available = sorted(po_filtered["Product_Code"].dropna().unique().tolist())
-    selected_product = st.selectbox(
-        "Or select a Product Code:",
-        ["All Products"] + products_available,
-        key="po_product_select"
-    )
-    if selected_product != "All Products":
-        po_filtered = po_filtered[po_filtered["Product_Code"] == selected_product]
+        products_available = sorted(po_filtered["Product_Code"].dropna().unique().tolist())
+        selected_product = st.selectbox(
+            "Or select a Product Code:",
+            ["All Products"] + products_available,
+            key="po_product_select"
+        )
+        if selected_product != "All Products":
+            po_filtered = po_filtered[po_filtered["Product_Code"] == selected_product]
 
-# -----------------------------
-# Trip number filter
-# -----------------------------
-if "Supplier_Trip_No" in po_filtered.columns:
-    trip_options = sorted(po_filtered["Supplier_Trip_No"].dropna().unique().tolist())
-    selected_trip = st.selectbox(
-        "Filter by Trip Number:",
-        ["All Trips"] + trip_options,
-        key="po_trip_select"
-    )
-    if selected_trip != "All Trips":
-        po_filtered = po_filtered[po_filtered["Supplier_Trip_No"] == selected_trip]
+    # -----------------------------
+    # Trip number filter
+    # -----------------------------
+    if "Supplier_Trip_No" in po_filtered.columns:
+        trip_options = sorted(po_filtered["Supplier_Trip_No"].dropna().unique().tolist())
+        selected_trip = st.selectbox(
+            "Filter by Trip Number:",
+            ["All Trips"] + trip_options,
+            key="po_trip_select"
+        )
+        if selected_trip != "All Trips":
+            po_filtered = po_filtered[po_filtered["Supplier_Trip_No"] == selected_trip]
 
     # -----------------------------
     # Build column list for display
     # -----------------------------
     preferred_cols_po = [
         "PO_Number",
-        "Supplier",
         "Supplier_Trip_No",
         "Product_Code",
-        "Qty_Ordered",
-        "Qty_Delivered",
         "Qty_Outstanding",
-        "Free_Stock",
         "Orig_Due_Date",
         "Current_Due_Date",
         "Difference",
         "Active_Works_Orders",
-        "Customer"
+        "Customer",
     ]
     po_show_cols = [c for c in preferred_cols_po if c in po_filtered.columns]
-
-    # If nothing matched, just show all columns
     if not po_show_cols:
         po_show_cols = po_filtered.columns.tolist()
+
+    # -----------------------------
+    # Date formatting helper (UK style)
+    # -----------------------------
+    def format_po_dates(dframe: pd.DataFrame) -> pd.DataFrame:
+        dframe = dframe.copy()
+        for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date"]:
+            if dcol in dframe.columns and pd.api.types.is_datetime64_any_dtype(dframe[dcol]):
+                dframe[dcol] = dframe[dcol].dt.strftime("%d/%m/%Y")
+        return dframe
 
     # -----------------------------
     # Summary + download
@@ -691,94 +634,74 @@ if "Supplier_Trip_No" in po_filtered.columns:
             key="po_download_btn",
         )
 
-# -----------------------------
-# Final display – always show something (with UK date format)
-# -----------------------------
-
-def format_po_dates(dframe: pd.DataFrame) -> pd.DataFrame:
-    dframe = dframe.copy()
-    for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date"]:
-        if dcol in dframe.columns:
-            # Only format non-null datetimes
-            dframe[dcol] = dframe[dcol].dt.strftime("%d/%m/%Y")
-    return dframe
-
-if not po_filtered.empty:
-    display_po = format_po_dates(po_filtered[po_show_cols])
-    st.dataframe(display_po, use_container_width=True)
-else:
-    st.warning("No purchase orders match the current filters – showing all POs instead.")
-    # Show all POs, formatted
-    all_display_po = format_po_dates(po_df[po_show_cols])
-    st.dataframe(all_display_po, use_container_width=True)
-
-# =========================================================
-# 🚨 Orders with Due Date Changes (Early / Late)
-# =========================================================
-st.subheader("🚨 Orders with Due Date Changes")
-
-if "Difference" not in po_df.columns:
-    st.info("No 'Difference' column found in the PO data.")
-else:
-    diff_df = po_df.copy()
-
-    # Keep only rows where Difference is non-zero
-    diff_df = diff_df[diff_df["Difference"] != 0]
-
-    if diff_df.empty:
-        st.info("No orders have a due date change (Difference = 0 for all rows).")
+    # -----------------------------
+    # Final display – always show something (with UK date format)
+    # -----------------------------
+    if not po_filtered.empty:
+        display_po = format_po_dates(po_filtered[po_show_cols])
+        st.dataframe(display_po, use_container_width=True)
     else:
-        # Optional: add a human-readable description column
-        def describe_diff(d):
-            try:
-                d_int = int(d)
-            except Exception:
+        st.warning("No purchase orders match the current filters – showing all POs instead.")
+        all_display_po = format_po_dates(po_df[po_show_cols])
+        st.dataframe(all_display_po, use_container_width=True)
+
+    # =========================================================
+    # 🚨 Orders with Due Date Changes (Early / Late)
+    # =========================================================
+    st.subheader("🚨 Orders with Due Date Changes")
+
+    if "Difference" not in po_df.columns:
+        st.info("No 'Difference' column found in the PO data.")
+    else:
+        diff_df = po_df.copy()
+        diff_df = diff_df[diff_df["Difference"] != 0]
+
+        if diff_df.empty:
+            st.info("No orders have a due date change (Difference = 0 for all rows).")
+        else:
+            def describe_diff(d):
+                try:
+                    d_int = int(d)
+                except Exception:
+                    return ""
+                if d_int > 0:
+                    return f"Late by {d_int} day(s)"
+                elif d_int < 0:
+                    return f"Early by {abs(d_int)} day(s)"
                 return ""
-            if d_int > 0:
-                return f"Late by {d_int} day(s)"
-            elif d_int < 0:
-                return f"Early by {abs(d_int)} day(s)"
-            return ""
 
-        diff_df = diff_df.copy()
-        diff_df["Due_Date_Change"] = diff_df["Difference"].apply(describe_diff)
+            diff_df = diff_df.copy()
+            diff_df["Due_Date_Change"] = diff_df["Difference"].apply(describe_diff)
 
-        # Pick columns to show
-        diff_cols_preferred = [
-            "PO_Number",
-            "Product_Code",
-            "Qty_Outstanding",
-            "Current_Due_Date",
-            "Difference",
-            "Due_Date_Change",
-            "Active_Works_Orders",
-            "Customer",
-        ]
-        diff_show_cols = [c for c in diff_cols_preferred if c in diff_df.columns]
+            diff_cols_preferred = [
+                "PO_Number",
+                "Product_Code",
+                "Qty_Outstanding",
+                "Orig_Due_Date",
+                "Current_Due_Date",
+                "Difference",
+                "Due_Date_Change",
+                "Active_Works_Orders",
+                "Customer",
+            ]
+            diff_show_cols = [c for c in diff_cols_preferred if c in diff_df.columns]
+            if not diff_show_cols:
+                diff_show_cols = diff_df.columns.tolist()
 
-        if not diff_show_cols:
-            diff_show_cols = diff_df.columns.tolist()
+            diff_display = format_po_dates(diff_df[diff_show_cols])
 
-        # Format dates in UK style
-        diff_display = format_po_dates(diff_df[diff_show_cols])
+            def colour_row_by_difference(row):
+                diff_val = row.get("Difference", None)
+                try:
+                    diff_val = float(diff_val)
+                except Exception:
+                    return [""] * len(row)
+                if diff_val > 0:
+                    return ["background-color: #ffcccc"] * len(row)  # late: light red
+                elif diff_val < 0:
+                    return ["background-color: #ccffcc"] * len(row)  # early: light green
+                else:
+                    return [""] * len(row)
 
-        # Row-level colour coding based on Difference
-        def colour_row_by_difference(row):
-            diff_val = row.get("Difference", None)
-            try:
-                diff_val = float(diff_val)
-            except Exception:
-                return [""] * len(row)
-
-            # >0 = late (red), <0 = early (green)
-            if diff_val > 0:
-                return ["background-color: #ffcccc"] * len(row)  # light red
-            elif diff_val < 0:
-                return ["background-color: #ccffcc"] * len(row)  # light green
-            else:
-                return [""] * len(row)
-
-        styled_diff = diff_display.style.apply(colour_row_by_difference, axis=1)
-
-        st.dataframe(styled_diff, use_container_width=True)
-    
+            styled_diff = diff_display.style.apply(colour_row_by_difference, axis=1)
+            st.dataframe(styled_diff, use_container_width=True)
