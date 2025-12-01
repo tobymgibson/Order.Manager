@@ -4,6 +4,7 @@ import re
 from datetime import date, datetime
 import gspread
 from google.oauth2 import service_account
+import json  # <--- needed for secrets JSON
 
 # =========================================================
 # Page config
@@ -19,20 +20,33 @@ TAB_NAME = "CTI"
 
 # Progroup POs – separate workbook
 PO_SHEET_URL = "https://docs.google.com/spreadsheets/d/1Ct5jXkpG6x13AnQeJ12589jj2ZCe7f3EERTU77KEYhQ"
-PO_TAB_NAME = "Progroup_POs"
+PO_TAB_NAME = "Progroup_POs"  # must match tab name exactly
+
+
+def _get_creds():
+    """
+    Load Google service account credentials from Streamlit secrets.
+    In your Secrets page you should have:
+
+    [google]
+    service_account_json = \"\"\"{ ...full JSON... }\"\"\"
+    """
+    return service_account.Credentials.from_service_account_info(
+        json.loads(st.secrets["google"]["service_account_json"]),
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+    )
 
 
 @st.cache_data(show_spinner=False, ttl=120)
 def load_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
-    creds = service_account.Credentials.from_service_account_file(
-        "gcp_service_account.json",
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
-    )
+    """Simple loader: first row is header (used for CTI sheet)."""
+    creds = _get_creds()
     client = gspread.authorize(creds)
     ss = client.open_by_url(_sheet_url)
     ws = ss.worksheet(_tab)
     data = ws.get_all_records()
     return pd.DataFrame(data)
+
 
 @st.cache_data(show_spinner=False, ttl=120)
 def load_po_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
@@ -40,13 +54,56 @@ def load_po_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
     Load the Progroup POs sheet, but intelligently find the correct header row
     (the row containing Supplier_Name and PO_Number).
     """
-    creds = service_account.Credentials.from_service_account_file(
-        "gcp_service_account.json",
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
-    )
+    creds = _get_creds()
     client = gspread.authorize(creds)
     ss = client.open_by_url(_sheet_url)
     ws = ss.worksheet(_tab)
+
+    # Get ALL values, including any junk/hidden rows above the real header
+    values = ws.get_all_values()
+    if not values:
+        return pd.DataFrame()
+
+    # Find row that has both Supplier_Name and PO_Number
+    header_idx = None
+    for i, row in enumerate(values):
+        if "Supplier_Name" in row and "PO_Number" in row:
+            header_idx = i
+            break
+
+    # Fallback to first row if we don't find a better header
+    if header_idx is None:
+        header = values[0]
+        data_rows = values[1:]
+    else:
+        header = values[header_idx]
+        data_rows = values[header_idx + 1:]
+
+    return pd.DataFrame(data_rows, columns=header)
+
+
+# =========================================================
+# Reload button and initial loads
+# =========================================================
+reload = st.sidebar.button("🔄 Refresh data")
+if reload:
+    st.cache_data.clear()
+
+# Production sheet
+try:
+    df = load_sheet(SHEET_URL, TAB_NAME)
+    st.sidebar.success("Connected to CTI Production Sheet ✅")
+except Exception as e:
+    st.sidebar.error(f"⚠️ Could not load data from Production Google Sheet.\n{e}")
+    st.stop()
+
+# Purchase orders sheet
+po_df = None
+try:
+    po_df = load_po_sheet(PO_SHEET_URL, PO_TAB_NAME)
+    st.sidebar.success("Connected to Progroup POs Sheet ✅")
+except Exception as e:
+    st.sidebar.warning(f"⚠️ Could not load data from Progroup POs sheet.\n{e}")
 
     # Get ALL values (rows), including header and any junk rows above it
     values = ws.get_all_values()
