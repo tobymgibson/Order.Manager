@@ -627,6 +627,7 @@ else:
         "Difference",
         "Active_Works_Orders",
         "Customer",
+        "W/O_Due_Date"
     ]
     po_show_cols = [c for c in preferred_cols_po if c in po_filtered.columns]
     if not po_show_cols:
@@ -709,6 +710,7 @@ else:
                 "Due_Date_Change",
                 "Active_Works_Orders",
                 "Customer",
+                "W/O_Due_Date"
             ]
             diff_show_cols = [c for c in diff_cols_preferred if c in diff_df.columns]
             if not diff_show_cols:
