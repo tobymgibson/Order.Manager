@@ -317,12 +317,38 @@ selected_machine = st.selectbox("Filter by Machine", ["All Machines"] + machines
 sort_order = st.radio("Sort by Finish Date:", ["Earliest first", "Latest first"], horizontal=True)
 
 # =========================================================
+# Customer Filter (NEW)
+# =========================================================
+
+customer_col = "Customer"  # adjust if your column is named differently
+
+if customer_col in filtered_pre_machine.columns:
+    customers_available = (
+        filtered_pre_machine[customer_col]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    customers_available = sorted(customers_available)
+
+    selected_customer = st.selectbox(
+        "Filter by Customer",
+        ["All Customers"] + customers_available
+    )
+else:
+    selected_customer = "All Customers"
+
+# =========================================================
 # Apply filters + local deletions (production)
 # =========================================================
 filtered = filtered_pre_machine.copy()
 
 if selected_machine != "All Machines" and "Machine" in filtered.columns:
     filtered = filtered[filtered["Machine"] == selected_machine]
+
+# Apply Customer filter
+if selected_customer != "All Customers" and customer_col in filtered.columns:
+    filtered = filtered[filtered[customer_col] == selected_customer]    
 
 if "Finish" in filtered.columns:
     filtered = filtered.sort_values(by="Finish", ascending=(sort_order == "Earliest first"))
