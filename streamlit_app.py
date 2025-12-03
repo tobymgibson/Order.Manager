@@ -5,7 +5,6 @@ from datetime import date, datetime
 import gspread
 from google.oauth2 import service_account
 
-
 # =========================================================
 # Page config
 # =========================================================
@@ -14,83 +13,93 @@ st.set_page_config(page_title="CTI Production Dashboard", layout="wide")
 # =========================================================
 # Google Sheets connection
 # =========================================================
-# CTI production plan
 SHEET_URL = "https://docs.google.com/spreadsheets/d/1dLHPyIkZfJby-N-EMXTraJv25BxkauBHS2ycdndC1PY"
 TAB_NAME = "CTI"
 
-# Progroup POs – separate workbook
 PO_SHEET_URL = "https://docs.google.com/spreadsheets/d/1Ct5jXkpG6x13AnQeJ12589jj2ZCe7f3EERTU77KEYhQ"
-PO_TAB_NAME = "Progroup_POs"  # must match the tab name exactly
+PO_TAB_NAME = "Progroup_POs"
 
-# ---------- Credentials from Streamlit secrets ----------
+# =========================================================
+# RENAME MAPS — MUST COME *BEFORE* LOADING SHEETS
+# =========================================================
+
+cti_rename_map = {
+    "Machine": "Machine",
+    "Customer Name ": "Customer",
+    "ROW": "ROW",
+    "Feeds": "Feeds",
+    "Quantity": "Quantity",
+    "Finish": "Finish",
+    "Next Uncovered Order": "Next_Uncovered_Order",
+    "Order Value": "Order_Value",
+}
+
+po_rename_map = {
+    "Supplier_Name": "Supplier",
+    "PO_Number": "PO_Number",
+    "Product_Code": "Product_Code",
+    "Qty_Ordered": "Qty_Ordered",
+    "Qty_Delivered": "Qty_Delivered",
+    "Qty_Outstanding": "Qty_Outstanding",
+    "Free_Stock": "Free_Stock",
+    "Orig_Due_Date": "Orig_Due_Date",
+    "Current_Due_Date": "Current_Due_Date",
+    "Difference": "Difference",
+    "Active Works Orders": "Active_Works_Orders",   # important fix
+    "Customer ": "Customer",
+    "W/O_Due_Date": "WO_Due_Date",
+    "Supplier_Trip_No": "Supplier_Trip_No",
+}
+
+# =========================================================
+# Credentials Loader
+# =========================================================
 def _get_creds():
-    """
-    Load Google service account credentials from Streamlit secrets.
-
-    Expects secrets.toml to contain:
-
-    [google]
-    type = "service_account"
-    project_id = "cti-production-dashboard"
-    private_key_id = "..."
-    private_key = \"\"\"-----BEGIN PRIVATE KEY-----
-    ...
-    -----END PRIVATE KEY-----\"\"\"
-    client_email = "..."
-    token_uri = "https://oauth2.googleapis.com/token"
-    ...
-    """
     info = dict(st.secrets["google"])
     return service_account.Credentials.from_service_account_info(
         info,
         scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
     )
 
-
+# =========================================================
+# CTI Sheet Loader
+# =========================================================
 @st.cache_data(show_spinner=False, ttl=120)
-def load_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
-    """Simple loader: first row is header (used for CTI sheet)."""
+def load_sheet(sheet_url: str, tab: str) -> pd.DataFrame:
     creds = _get_creds()
     client = gspread.authorize(creds)
-    ss = client.open_by_url(_sheet_url)
-    ws = ss.worksheet(_tab)
-    data = ws.get_all_records()
-    return pd.DataFrame(data)
+    ws = client.open_by_url(sheet_url).worksheet(tab)
+    return pd.DataFrame(ws.get_all_records())
 
-
+# =========================================================
+# PO Sheet Loader (detects header row)
+# =========================================================
 @st.cache_data(show_spinner=False, ttl=120)
-def load_po_sheet(_sheet_url: str, _tab: str) -> pd.DataFrame:
-    """
-    Load the Progroup POs sheet and automatically detect the correct header row
-    (the row containing Supplier_Name and PO_Number).
-    """
+def load_po_sheet(sheet_url: str, tab: str) -> pd.DataFrame:
+
     creds = _get_creds()
     client = gspread.authorize(creds)
-    ss = client.open_by_url(_sheet_url)
-    ws = ss.worksheet(_tab)
+    ws = client.open_by_url(sheet_url).worksheet(tab)
 
-    # Get all rows (including any junk/hidden rows above the real header)
-    values = ws.get_all_values()
-    if not values:
+    rows = ws.get_all_values()
+    if not rows:
         return pd.DataFrame()
 
-    # Find header row (contains Supplier_Name and PO_Number)
+    # detect header row
     header_idx = None
-    for i, row in enumerate(values):
+    for i, row in enumerate(rows):
         if "Supplier_Name" in row and "PO_Number" in row:
             header_idx = i
             break
 
-    # If nothing found, default to first row
     if header_idx is None:
-        header = values[0]
-        data_rows = values[1:]
+        header = rows[0]
+        data = rows[1:]
     else:
-        header = values[header_idx]
-        data_rows = values[header_idx + 1:]
+        header = rows[header_idx]
+        data = rows[header_idx + 1:]
 
-    return pd.DataFrame(data_rows, columns=header)
-
+    return pd.DataFrame(data, columns=header)
 
 # =========================================================
 # Reload button and initial loads
@@ -111,9 +120,12 @@ except Exception as e:
 po_df = None
 try:
     po_df = load_po_sheet(PO_SHEET_URL, PO_TAB_NAME)
-    st.sidebar.success("Connected to Progroup POs Sheet ✅")
+    po_df = po_df.rename(columns=po_rename_map)
+
+    st.sidebar.success("Loaded Progroup POs successfully")
 except Exception as e:
-    st.sidebar.warning(f"⚠️ Could not load data from Progroup POs sheet.\n{e}")
+    st.sidebar.error(f"⚠️ Could not load data from Progroup POs sheet.\n{e}")
+    po_df = pd.DataFrame()
 
     # =========================================================
 # Clean and normalise CTI production data
@@ -479,20 +491,24 @@ else:
     # Supplier_Name, PO_Number, Acknowledge_Date, Supplier_Trip_No,
     # Product_Code, Qty_Ordered, Qty_Delivered, Qty_Outstanding,
     # Free_Stock, Orig_Due_Date, Current_Due_Date, Difference,
-    # Active_Works_Orders
+    # Active Works Orders
 
     po_rename_map = {
-        "Supplier_Name": "Supplier",
-        "Product_Code": "Product_Code",
-        "Qty_Ordered": "Qty_Ordered",
-        "Qty_Delivered": "Qty_Delivered",
-        "Qty_Outstanding": "Qty_Outstanding",
-        "Free_Stock": "Free_Stock",
-        "Orig_Due_Date": "Orig_Due_Date",
-        "Current_Due_Date": "Current_Due_Date",
-        "Difference": "Difference",
-        "Active_Works_Orders": "Active_Works_Orders",
-    }
+    "Supplier_Name": "Supplier",
+    "PO_Number": "PO_Number",
+    "Product_Code": "Product_Code",
+    "Qty_Ordered": "Qty_Ordered",
+    "Qty_Delivered": "Qty_Delivered",
+    "Qty_Outstanding": "Qty_Outstanding",
+    "Free_Stock": "Free_Stock",
+    "Orig_Due_Date": "Orig_Due_Date",
+    "Current_Due_Date": "Current_Due_Date",
+    "Difference": "Difference",
+    "Active Works Orders": "Active_Works_Orders",
+    "Customer ": "Customer",
+    "W/O_Due_Date": "WO_Due_Date",
+    "Supplier_Trip_No": "Supplier_Trip_No",
+}
     po_df = po_df.rename(columns={k: v for k, v in po_rename_map.items() if k in po_df.columns})
 
     # Create Customer alias from Supplier if no Customer column
@@ -574,103 +590,129 @@ else:
             (po_filtered["Current_Due_Date"].dt.date <= po_end)
         ]
 
-    # -----------------------------
-    # Product filter (search + dropdown)
-    # -----------------------------
-    if "Product_Code" in po_filtered.columns:
-        product_search = st.text_input(
-            "Search Product Code (partial match):",
-            value="",
-            key="po_product_search",
-            placeholder="Type part of a product code..."
-        )
+# -----------------------------
+# Works Order dropdown (searchable)
+# -----------------------------
+wo_col = "Active_Works_Orders"   # normalised column name
 
-        if product_search.strip():
-            po_filtered = po_filtered[
-                po_filtered["Product_Code"]
-                .astype(str)
-                .str.contains(product_search.strip(), case=False, na=False)
-            ]
+if wo_col in po_filtered.columns:
+    works_orders_available = (
+        po_filtered[wo_col]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+    works_orders_available = sorted(works_orders_available)
 
-        products_available = sorted(po_filtered["Product_Code"].dropna().unique().tolist())
-        selected_product = st.selectbox(
-            "Or select a Product Code:",
-            ["All Products"] + products_available,
-            key="po_product_select"
-        )
-        if selected_product != "All Products":
-            po_filtered = po_filtered[po_filtered["Product_Code"] == selected_product]
+    selected_wo = st.selectbox(
+        "Select Works Order (searchable):",
+        ["All Works Orders"] + works_orders_available,
+        key="po_wo_select"
+    )
 
-    # -----------------------------
-    # Trip number filter
-    # -----------------------------
-    if "Supplier_Trip_No" in po_filtered.columns:
-        trip_options = sorted(po_filtered["Supplier_Trip_No"].dropna().unique().tolist())
-        selected_trip = st.selectbox(
-            "Filter by Trip Number:",
-            ["All Trips"] + trip_options,
-            key="po_trip_select"
-        )
-        if selected_trip != "All Trips":
-            po_filtered = po_filtered[po_filtered["Supplier_Trip_No"] == selected_trip]
+    if selected_wo != "All Works Orders":
+        po_filtered = po_filtered[
+            po_filtered[wo_col].astype(str) == selected_wo
+        ]
+else:
+    st.warning(f"Column '{wo_col}' not found in PO sheet.")
 
-    # -----------------------------
-    # Build column list for display
-    # -----------------------------
-    preferred_cols_po = [
-        "PO_Number",
-        "Supplier_Trip_No",
-        "Product_Code",
-        "Qty_Outstanding",
-        "Orig_Due_Date",
-        "Current_Due_Date",
-        "Difference",
-        "Active_Works_Orders",
-        "Customer",
-        "W/O_Due_Date"
-    ]
-    po_show_cols = [c for c in preferred_cols_po if c in po_filtered.columns]
-    if not po_show_cols:
-        po_show_cols = po_filtered.columns.tolist()
+# -----------------------------
+# Product dropdown (unchanged)
+# -----------------------------
+if "Product_Code" in po_filtered.columns:
+    products_available = sorted(
+        po_filtered["Product_Code"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
 
-    # -----------------------------
-    # Date formatting helper (UK style)
-    # -----------------------------
-    def format_po_dates(dframe: pd.DataFrame) -> pd.DataFrame:
-        dframe = dframe.copy()
-        for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date"]:
-            if dcol in dframe.columns and pd.api.types.is_datetime64_any_dtype(dframe[dcol]):
-                dframe[dcol] = dframe[dcol].dt.strftime("%d/%m/%Y")
-        return dframe
+    selected_product = st.selectbox(
+        "Or select a Product Code:",
+        ["All Products"] + products_available,
+        key="po_product_select"
+    )
 
-    # -----------------------------
-    # Summary + download
-    # -----------------------------
-    po_cA, po_cB = st.columns([3, 1])
-    with po_cA:
-        visible_outstanding = po_filtered["Qty_Outstanding"].sum() if "Qty_Outstanding" in po_filtered.columns else 0
-        st.markdown(f"**📊 Outstanding Qty in View:** {int(visible_outstanding):,}")
+    if selected_product != "All Products":
+        po_filtered = po_filtered[
+            po_filtered["Product_Code"].astype(str) == str(selected_product)
+        ]
+else:
+    st.warning("Column 'Product_Code' not found in Purchase Orders sheet.")
 
-    with po_cB:
-        st.download_button(
-            label="⬇️ Download PO view (CSV)",
-            data=po_filtered[po_show_cols].to_csv(index=False).encode("utf-8"),
-            file_name="purchase_orders_filtered_view.csv",
-            mime="text/csv",
-            use_container_width=True,
-            key="po_download_btn",
-        )
+# -----------------------------
+# Trip number filter
+# -----------------------------
+if "Supplier_Trip_No" in po_filtered.columns:
+    trip_options = sorted(po_filtered["Supplier_Trip_No"].dropna().unique().tolist())
+    selected_trip = st.selectbox(
+        "Filter by Trip Number:",
+        ["All Trips"] + trip_options,
+        key="po_trip_select"
+    )
+    if selected_trip != "All Trips":
+        po_filtered = po_filtered[po_filtered["Supplier_Trip_No"] == selected_trip]
 
-    # -----------------------------
-    # Final display – always show something (with UK date format)
-    # -----------------------------
-    if not po_filtered.empty:
-        display_po = format_po_dates(po_filtered[po_show_cols])
-        st.dataframe(display_po, use_container_width=True)
-    else:
-        st.warning("No purchase orders match the current filters – showing all POs instead.")
-        all_display_po = format_po_dates(po_df[po_show_cols])
-        st.dataframe(all_display_po, use_container_width=True)
+# -----------------------------
+# Build column list for display
+# -----------------------------
+preferred_cols_po = [
+    "PO_Number",
+    "Supplier_Trip_No",
+    "Product_Code",
+    "Qty_Outstanding",
+    "Orig_Due_Date",
+    "Current_Due_Date",
+    "Difference",
+    "Active_Works_Orders",
+    "Customer",
+    "WO_Due_Date"
+]
+po_show_cols = [c for c in preferred_cols_po if c in po_filtered.columns]
+if not po_show_cols:
+    po_show_cols = po_filtered.columns.tolist()
+
+# -----------------------------
+# Date formatting helper (UK style)
+# -----------------------------
+def format_po_dates(dframe: pd.DataFrame) -> pd.DataFrame:
+    dframe = dframe.copy()
+    for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date"]:
+        if dcol in dframe.columns and pd.api.types.is_datetime64_any_dtype(dframe[dcol]):
+            dframe[dcol] = dframe[dcol].dt.strftime("%d/%m/%Y")
+    return dframe
+
+# -----------------------------
+# Summary + download
+# -----------------------------
+po_cA, po_cB = st.columns([3, 1])
+with po_cA:
+    visible_outstanding = po_filtered["Qty_Outstanding"].sum() if "Qty_Outstanding" in po_filtered.columns else 0
+    st.markdown(f"**📊 Outstanding Qty in View:** {int(visible_outstanding):,}")
+
+with po_cB:
+    st.download_button(
+        label="⬇️ Download PO view (CSV)",
+        data=po_filtered[po_show_cols].to_csv(index=False).encode("utf-8"),
+        file_name="purchase_orders_filtered_view.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="po_download_btn",
+    )
+
+# -----------------------------
+# Final display – always show table
+# -----------------------------
+if not po_filtered.empty:
+    display_po = format_po_dates(po_filtered[po_show_cols])
+    st.dataframe(display_po, use_container_width=True)
+else:
+    st.warning("No purchase orders match the current filters – showing all POs instead.")
+    all_display_po = format_po_dates(po_df[po_show_cols])
+    st.dataframe(all_display_po, use_container_width=True)
 
     # =========================================================
     # 🚨 Orders with Due Date Changes (Early / Late)
@@ -708,7 +750,7 @@ else:
                 "Current_Due_Date",
                 "Difference",
                 "Due_Date_Change",
-                "Active_Works_Orders",
+                "Active Works Orders",
                 "Customer",
                 "W/O_Due_Date"
             ]
