@@ -477,7 +477,7 @@ if po_df is None or po_df.empty:
     st.info("No purchase order data available (could not load PO sheet or sheet is empty).")
 else:
     # -----------------------------
-    # Normalise column names
+    # Normalise + rename columns
     # -----------------------------
     po_df = po_df.copy()
     po_df.columns = (
@@ -487,31 +487,27 @@ else:
                      .str.replace(r"__+", "_", regex=True)
     )
 
-    # Expected headers from your PO sheet:
-    # Supplier_Name, PO_Number, Acknowledge_Date, Supplier_Trip_No,
-    # Product_Code, Qty_Ordered, Qty_Delivered, Qty_Outstanding,
-    # Free_Stock, Orig_Due_Date, Current_Due_Date, Difference,
-    # Active Works Orders
-
+    # Map normalised header names to friendly names
     po_rename_map = {
-    "Supplier_Name": "Supplier",
-    "PO_Number": "PO_Number",
-    "Product_Code": "Product_Code",
-    "Qty_Ordered": "Qty_Ordered",
-    "Qty_Delivered": "Qty_Delivered",
-    "Qty_Outstanding": "Qty_Outstanding",
-    "Free_Stock": "Free_Stock",
-    "Orig_Due_Date": "Orig_Due_Date",
-    "Current_Due_Date": "Current_Due_Date",
-    "Difference": "Difference",
-    "Active Works Orders": "Active_Works_Orders",
-    "Customer ": "Customer",
-    "W/O_Due_Date": "WO_Due_Date",
-    "Supplier_Trip_No": "Supplier_Trip_No",
-}
+        "Supplier_Name": "Supplier",
+        "PO_Number": "PO_Number",
+        "Acknowledge_Date": "Acknowledge_Date",
+        "Supplier_Trip_No": "Supplier_Trip_No",
+        "Product_Code": "Product_Code",
+        "Qty_Ordered": "Qty_Ordered",
+        "Qty_Delivered": "Qty_Delivered",
+        "Qty_Outstanding": "Qty_Outstanding",
+        "Free_Stock": "Free_Stock",
+        "Orig_Due_Date": "Orig_Due_Date",
+        "Current_Due_Date": "Current_Due_Date",
+        "Difference": "Difference",
+        "Active_Works_Orders": "Active_Works_Orders",   # from "Active Works Orders"
+        "Customer_": "Customer",
+        "W_O_Due_Date": "WO_Due_Date",
+    }
     po_df = po_df.rename(columns={k: v for k, v in po_rename_map.items() if k in po_df.columns})
 
-    # Create Customer alias from Supplier if no Customer column
+    # If Customer missing, use Supplier as fallback
     if "Customer" not in po_df.columns and "Supplier" in po_df.columns:
         po_df["Customer"] = po_df["Supplier"]
 
@@ -528,7 +524,7 @@ else:
         if num_col in po_df.columns:
             po_df[num_col] = po_to_number(po_df[num_col]).fillna(0)
 
-    for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date"]:
+    for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date", "WO_Due_Date"]:
         if dcol in po_df.columns:
             po_df[dcol] = pd.to_datetime(po_df[dcol], errors="coerce", dayfirst=True)
 
@@ -590,129 +586,149 @@ else:
             (po_filtered["Current_Due_Date"].dt.date <= po_end)
         ]
 
-# -----------------------------
-# Works Order dropdown (searchable)
-# -----------------------------
-wo_col = "Active_Works_Orders"   # normalised column name
+    # -----------------------------
+    # Works Order dropdown (searchable)
+    # -----------------------------
+    wo_col = "Active_Works_Orders"
+    if wo_col in po_filtered.columns:
+        works_orders_available = (
+            po_filtered[wo_col]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        works_orders_available = sorted(works_orders_available)
 
-if wo_col in po_filtered.columns:
-    works_orders_available = (
-        po_filtered[wo_col]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-    works_orders_available = sorted(works_orders_available)
+        selected_wo = st.selectbox(
+            "Select Works Order (searchable):",
+            ["All Works Orders"] + works_orders_available,
+            key="po_wo_select"
+        )
 
-    selected_wo = st.selectbox(
-        "Select Works Order (searchable):",
-        ["All Works Orders"] + works_orders_available,
-        key="po_wo_select"
-    )
+        if selected_wo != "All Works Orders":
+            po_filtered = po_filtered[
+                po_filtered[wo_col].astype(str) == selected_wo
+            ]
 
-    if selected_wo != "All Works Orders":
-        po_filtered = po_filtered[
-            po_filtered[wo_col].astype(str) == selected_wo
-        ]
-else:
-    st.warning(f"Column '{wo_col}' not found in PO sheet.")
+    # -----------------------------
+    # Product dropdown
+    # -----------------------------
+    if "Product_Code" in po_filtered.columns:
+        products_available = sorted(
+            po_filtered["Product_Code"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
 
-# -----------------------------
-# Product dropdown (unchanged)
-# -----------------------------
-if "Product_Code" in po_filtered.columns:
-    products_available = sorted(
-        po_filtered["Product_Code"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
+        selected_product = st.selectbox(
+            "Or select a Product Code:",
+            ["All Products"] + products_available,
+            key="po_product_select"
+        )
 
-    selected_product = st.selectbox(
-        "Or select a Product Code:",
-        ["All Products"] + products_available,
-        key="po_product_select"
-    )
+        if selected_product != "All Products":
+            po_filtered = po_filtered[
+                po_filtered["Product_Code"].astype(str) == str(selected_product)
+            ]
+    else:
+        st.warning("Column 'Product_Code' not found in Purchase Orders sheet.")
 
-    if selected_product != "All Products":
-        po_filtered = po_filtered[
-            po_filtered["Product_Code"].astype(str) == str(selected_product)
-        ]
-else:
-    st.warning("Column 'Product_Code' not found in Purchase Orders sheet.")
+    # -----------------------------
+    # Trip number filter
+    # -----------------------------
+    if "Supplier_Trip_No" in po_filtered.columns:
+        trip_options = sorted(po_filtered["Supplier_Trip_No"].dropna().unique().tolist())
+        selected_trip = st.selectbox(
+            "Filter by Trip Number:",
+            ["All Trips"] + trip_options,
+            key="po_trip_select"
+        )
+        if selected_trip != "All Trips":
+            po_filtered = po_filtered[po_filtered["Supplier_Trip_No"] == selected_trip]
 
-# -----------------------------
-# Trip number filter
-# -----------------------------
-if "Supplier_Trip_No" in po_filtered.columns:
-    trip_options = sorted(po_filtered["Supplier_Trip_No"].dropna().unique().tolist())
-    selected_trip = st.selectbox(
-        "Filter by Trip Number:",
-        ["All Trips"] + trip_options,
-        key="po_trip_select"
-    )
-    if selected_trip != "All Trips":
-        po_filtered = po_filtered[po_filtered["Supplier_Trip_No"] == selected_trip]
+    # -----------------------------
+    # Build column list for display
+    # -----------------------------
+    preferred_cols_po = [
+        "PO_Number",
+        "Supplier_Trip_No",
+        "Product_Code",
+        "Qty_Outstanding",
+        "Orig_Due_Date",
+        "Current_Due_Date",
+        "Difference",
+        "Active_Works_Orders",
+        "Customer",
+        "WO_Due_Date",
+    ]
+    po_show_cols = [c for c in preferred_cols_po if c in po_filtered.columns]
+    if not po_show_cols:
+        po_show_cols = po_filtered.columns.tolist()
 
-# -----------------------------
-# Build column list for display
-# -----------------------------
-preferred_cols_po = [
-    "PO_Number",
-    "Supplier_Trip_No",
-    "Product_Code",
-    "Qty_Outstanding",
-    "Orig_Due_Date",
-    "Current_Due_Date",
-    "Difference",
-    "Active_Works_Orders",
-    "Customer",
-    "WO_Due_Date"
-]
-po_show_cols = [c for c in preferred_cols_po if c in po_filtered.columns]
-if not po_show_cols:
-    po_show_cols = po_filtered.columns.tolist()
+    # -----------------------------
+    # Date formatting helper (UK style)
+    # -----------------------------
+    def format_po_dates(dframe: pd.DataFrame) -> pd.DataFrame:
+        dframe = dframe.copy()
+        for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date", "WO_Due_Date"]:
+            if dcol in dframe.columns and pd.api.types.is_datetime64_any_dtype(dframe[dcol]):
+                dframe[dcol] = dframe[dcol].dt.strftime("%d/%m/%Y")
+        return dframe
 
-# -----------------------------
-# Date formatting helper (UK style)
-# -----------------------------
-def format_po_dates(dframe: pd.DataFrame) -> pd.DataFrame:
-    dframe = dframe.copy()
-    for dcol in ["Orig_Due_Date", "Current_Due_Date", "Acknowledge_Date"]:
-        if dcol in dframe.columns and pd.api.types.is_datetime64_any_dtype(dframe[dcol]):
-            dframe[dcol] = dframe[dcol].dt.strftime("%d/%m/%Y")
-    return dframe
+    # -----------------------------
+    # Row colouring based on Difference
+    # -----------------------------
+    def colour_row_by_difference(row):
+        diff_val = row.get("Difference", None)
+        try:
+            diff_val = float(diff_val)
+        except Exception:
+            return [""] * len(row)
+        if diff_val > 0:
+            return ["background-color: #ffcccc"] * len(row)   # late
+        elif diff_val < 0:
+            return ["background-color: #ccffcc"] * len(row)   # early
+        return [""] * len(row)
 
-# -----------------------------
-# Summary + download
-# -----------------------------
-po_cA, po_cB = st.columns([3, 1])
-with po_cA:
-    visible_outstanding = po_filtered["Qty_Outstanding"].sum() if "Qty_Outstanding" in po_filtered.columns else 0
-    st.markdown(f"**📊 Outstanding Qty in View:** {int(visible_outstanding):,}")
+    # -----------------------------
+    # Summary + download
+    # -----------------------------
+    po_cA, po_cB = st.columns([3, 1])
+    with po_cA:
+        visible_outstanding = po_filtered["Qty_Outstanding"].sum() if "Qty_Outstanding" in po_filtered.columns else 0
+        st.markdown(f"**📊 Outstanding Qty in View:** {int(visible_outstanding):,}")
 
-with po_cB:
-    st.download_button(
-        label="⬇️ Download PO view (CSV)",
-        data=po_filtered[po_show_cols].to_csv(index=False).encode("utf-8"),
-        file_name="purchase_orders_filtered_view.csv",
-        mime="text/csv",
-        use_container_width=True,
-        key="po_download_btn",
-    )
+    with po_cB:
+        st.download_button(
+            label="⬇️ Download PO view (CSV)",
+            data=po_filtered[po_show_cols].to_csv(index=False).encode("utf-8"),
+            file_name="purchase_orders_filtered_view.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="po_download_btn",
+        )
 
-# -----------------------------
-# Final display – always show table
-# -----------------------------
-if not po_filtered.empty:
-    display_po = format_po_dates(po_filtered[po_show_cols])
-    st.dataframe(display_po, use_container_width=True)
-else:
-    st.warning("No purchase orders match the current filters – showing all POs instead.")
-    all_display_po = format_po_dates(po_df[po_show_cols])
-    st.dataframe(all_display_po, use_container_width=True)
+    # -----------------------------
+    # Final display – main PO table
+    # -----------------------------
+    if not po_filtered.empty:
+        display_po = format_po_dates(po_filtered[po_show_cols])
+        if "Difference" in display_po.columns:
+            styled_po = display_po.style.apply(colour_row_by_difference, axis=1)
+            st.dataframe(styled_po, use_container_width=True)
+        else:
+            st.dataframe(display_po, use_container_width=True)
+    else:
+        st.warning("No purchase orders match the current filters – showing all POs instead.")
+        all_display_po = format_po_dates(po_df[po_show_cols])
+        if "Difference" in all_display_po.columns:
+            styled_all_po = all_display_po.style.apply(colour_row_by_difference, axis=1)
+            st.dataframe(styled_all_po, use_container_width=True)
+        else:
+            st.dataframe(all_display_po, use_container_width=True)
 
     # =========================================================
     # 🚨 Orders with Due Date Changes (Early / Late)
@@ -744,34 +760,21 @@ else:
 
             diff_cols_preferred = [
                 "PO_Number",
+                "Supplier_Trip_No",
                 "Product_Code",
                 "Qty_Outstanding",
                 "Orig_Due_Date",
                 "Current_Due_Date",
                 "Difference",
                 "Due_Date_Change",
-                "Active Works Orders",
+                "Active_Works_Orders",
                 "Customer",
-                "W/O_Due_Date"
+                "WO_Due_Date",
             ]
             diff_show_cols = [c for c in diff_cols_preferred if c in diff_df.columns]
             if not diff_show_cols:
                 diff_show_cols = diff_df.columns.tolist()
 
             diff_display = format_po_dates(diff_df[diff_show_cols])
-
-            def colour_row_by_difference(row):
-                diff_val = row.get("Difference", None)
-                try:
-                    diff_val = float(diff_val)
-                except Exception:
-                    return [""] * len(row)
-                if diff_val > 0:
-                    return ["background-color: #ffcccc"] * len(row)  # late: light red
-                elif diff_val < 0:
-                    return ["background-color: #ccffcc"] * len(row)  # early: light green
-                else:
-                    return [""] * len(row)
-
             styled_diff = diff_display.style.apply(colour_row_by_difference, axis=1)
             st.dataframe(styled_diff, use_container_width=True)
