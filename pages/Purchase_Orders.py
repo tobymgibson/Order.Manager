@@ -232,7 +232,7 @@ else:
         from io import BytesIO
         buffer = BytesIO()
 
-        with pd.ExcelWriter(buffer, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             diff_df.to_excel(writer, index=False, sheet_name="Due_Date_Changes")
         buffer.seek(0)
 
