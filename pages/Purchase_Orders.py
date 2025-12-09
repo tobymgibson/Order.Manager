@@ -92,20 +92,44 @@ st.subheader("🗓️ Filter Purchase Orders")
 # ---------------------------------------------------------
 # DATE FILTER
 # ---------------------------------------------------------
-if "Current_Due_Date" in po_df.columns and not po_df["Current_Due_Date"].isna().all():
-    min_d, max_d = po_df["Current_Due_Date"].min().date(), po_df["Current_Due_Date"].max().date()
+po_filtered = po_df.copy()  # start from full PO dataset
+
+if "Current_Due_Date" in po_filtered.columns and not po_filtered["Current_Due_Date"].isna().all():
+    min_d = po_filtered["Current_Due_Date"].min().date()
+    max_d = po_filtered["Current_Due_Date"].max().date()
 else:
     min_d = max_d = today
 
-sel = st.date_input("Select Current Due Date range:", (min_d, max_d), format="DD/MM/YYYY")
+# ------------- Safe date range parsing -------------
+sel = st.date_input(
+    "Select Current Due Date range:",
+    value=(min_d, max_d),
+    min_value=min_d,
+    max_value=max_d,
+    key="po_date_range",
+    format="DD/MM/YYYY",
+)
 
-s, e = sel if isinstance(sel, tuple) else (sel, sel)
+# sel can be:
+# - a tuple/list of (start, end)
+# - a single date
+if isinstance(sel, (list, tuple)):
+    if len(sel) == 2:
+        start_date, end_date = sel
+    elif len(sel) == 1:
+        start_date = end_date = sel[0]
+    else:
+        start_date = end_date = min_d
+else:
+    start_date = end_date = sel
 
-po_filtered = po_df[
-    (po_df["Current_Due_Date"].dt.date >= s) &
-    (po_df["Current_Due_Date"].dt.date <= e)
-]
-
+# Apply date filter if we have valid dates
+if "Current_Due_Date" in po_filtered.columns and not po_filtered["Current_Due_Date"].isna().all():
+    po_filtered = po_filtered[
+        (po_filtered["Current_Due_Date"].dt.date >= start_date) &
+        (po_filtered["Current_Due_Date"].dt.date <= end_date)
+    ]
+    
 # ---------------------------------------------------------
 # WORKS ORDER DROPDOWN (searchable)
 # ---------------------------------------------------------

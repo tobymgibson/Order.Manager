@@ -122,7 +122,7 @@ try:
     po_df = load_po_sheet(PO_SHEET_URL, PO_TAB_NAME)
     po_df = po_df.rename(columns=po_rename_map)
 
-    st.sidebar.success("Loaded Progroup POs successfully")
+    st.sidebar.success("Loaded Progroup POs successfully ✅")
 except Exception as e:
     st.sidebar.error(f"⚠️ Could not load data from Progroup POs sheet.\n{e}")
     po_df = pd.DataFrame()
