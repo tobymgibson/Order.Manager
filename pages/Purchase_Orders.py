@@ -191,14 +191,20 @@ def format_dates(df):
 
 def row_colour(r):
     d = r.get("Difference", 0)
+
     try:
         d = float(d)
     except:
         return [""] * len(r)
+
     if d > 0:
-        return ["background-color:#ffcccc"] * len(r)
+        # LATE – strong red (visible in dark & light mode)
+        return ["background-color:#ff4d4d; color:white; border:1px solid #660000;"] * len(r)
+
     if d < 0:
-        return ["background-color:#ccffcc"] * len(r)
+        # EARLY – strong green (visible in dark & light mode)
+        return ["background-color:#2ecc71; color:white; border:1px solid #006622;"] * len(r)
+    
     return [""] * len(r)
 
 st.subheader("📋 Filtered Purchase Orders")
